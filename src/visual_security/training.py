@@ -5,7 +5,7 @@ from src.visual_security.utils.paths import DATA_DIR
 # -------------------------------------------
 # 1️⃣ Define the model
 # -------------------------------------------
-model = YOLO("yolo11m.pt")
+model = YOLO("yolo11n.pt")
 
 # -------------------------------------------
 # 2️⃣ Start training
