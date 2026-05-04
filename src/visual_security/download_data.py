@@ -11,8 +11,11 @@ load_dotenv(ROOT_DIR / ".env")
 
 def download():
     rf = Roboflow(api_key=os.getenv("ROBOFLOW_API_KEY"))
-    project = rf.workspace("akfa-beqxl").project("safety-rd-v1")
-    version = project.version(1)
+    # project = rf.workspace("akfa-beqxl").project("safety-rd-v1")
+    # version = project.version(1)
+
+    project = rf.workspace("ppe-yngjj").project("ppe-vum8g")
+    version = project.version(2)
 
     # Scarica
     raw_dataset = version.download("yolov11")

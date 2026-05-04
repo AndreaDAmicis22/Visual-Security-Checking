@@ -15,15 +15,13 @@ import json
 import os
 import sys
 import time
+import urllib.parse
 import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2 as cv
-
-from yolo.src.yolo.yolo_onnx import YOLOParams, YOLOPredictor
-from yolo.src.yolo.yolo_onnx.backends.onnxruntime import ONNXRuntimeBackend, ONNXRuntimeParams
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -176,6 +174,9 @@ class YOLOAnalyzer(BaseAnalyzer):
             if str(yolo_dir) not in sys.path:
                 sys.path.insert(0, str(yolo_dir))
 
+            from yolo.yolo_onnx import YOLOParams, YOLOPredictor
+            from yolo.yolo_onnx.backends.onnxruntime import ONNXRuntimeBackend, ONNXRuntimeParams
+
             backend = ONNXRuntimeBackend(ONNXRuntimeParams(self.model_path))
             self._model = YOLOPredictor(YOLOParams(self.imgsz, conf=self.conf_threshold), backend)
         except ImportError as e:
@@ -249,31 +250,44 @@ class AzureAIVisionAnalyzer(BaseAnalyzer):
         with open(image_path, "rb") as f:
             image_data = f.read()
 
-        # Configurazione: chiediamo il rilevamento di persone e oggetti (DPI)
         params = urllib.parse.urlencode({"features": "people,objects", "api-version": "2023-02-01-preview"})
-
-        url = f"{self.endpoint.rstrip('/')}/compute/vision/imageanalysis:analyze?{params}"
+        url = f"{self.endpoint.rstrip('/')}/computervision/imageanalysis:analyze?{params}"
 
         req = urllib.request.Request(
             url,
             data=image_data,
-            headers={"Content-Type": "application/octet-stream", "Ocp-Apim-Subscription-Key": self.api_key},
+            headers={
+                "Content-Type": "application/octet-stream",
+                "Ocp-Apim-Subscription-Key": self.api_key,
+            },
         )
 
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read())
 
         detections = []
-        # Estrazione oggetti rilevati (es. caschi, persone)
+        # Objects detected (helmets, vests, tools, etc.)
         for obj in data.get("objectsResult", {}).get("values", []):
-            tag = obj["tags"][0]
-            detections.append(
-                Detection(
-                    label=tag["name"].lower(),
-                    confidence=tag["confidence"],
-                    bbox=None,  # Azure fornisce bounding box se necessario in obj["boundingBox"]
-                )
-            )
+            for tag in obj.get("tags", []):
+                name = tag["name"].lower().replace(" ", "_")
+                # Map Azure object names to our label schema
+                label = _azure_label_map(name)
+                bb = obj.get("boundingBox", {})
+                bbox = None
+                if bb:
+                    x, y, w, h = bb.get("x", 0), bb.get("y", 0), bb.get("w", 0), bb.get("h", 0)
+                    bbox = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+                detections.append(Detection(label=label, confidence=tag["confidence"], bbox=bbox))
+
+        # People detected — flag as "person" if no PPE context
+        for person in data.get("peopleResult", {}).get("values", []):
+            bb = person.get("boundingBox", {})
+            bbox = None
+            if bb:
+                x, y, w, h = bb.get("x", 0), bb.get("y", 0), bb.get("w", 0), bb.get("h", 0)
+                bbox = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
+            detections.append(Detection(label="person", confidence=person.get("confidence", 0.9), bbox=bbox))
+
         return detections
 
 
@@ -344,18 +358,38 @@ class FoundryGPT4oAnalyzer(BaseAnalyzer):
 # ---------------------------------------------------------------------------
 # Multi-model runner
 # ---------------------------------------------------------------------------
+def _azure_label_map(azure_name: str) -> str:
+    """Map Azure Computer Vision object names to our safety label schema."""
+    _MAP = {
+        "helmet": "helmet",
+        "hard_hat": "helmet",
+        "hardhat": "helmet",
+        "safety_helmet": "helmet",
+        "construction_helmet": "helmet",
+        "vest": "vest",
+        "safety_vest": "vest",
+        "high_visibility_vest": "vest",
+        "hi-vis_vest": "vest",
+        "reflective_vest": "vest",
+        "glove": "gloves",
+        "gloves": "gloves",
+        "safety_gloves": "gloves",
+        "boot": "boots",
+        "boots": "boots",
+        "safety_boot": "boots",
+        "person": "person",
+        "man": "person",
+        "woman": "person",
+        "worker": "person",
+        "human": "person",
+        "construction_worker": "person",
+    }
+    return _MAP.get(azure_name, azure_name)
+
+
 class SafetyAnalyzerPipeline:
     """
     Runs multiple analyzers on one or more images and collects results.
-
-    Example:
-        pipeline = SafetyAnalyzerPipeline([
-            ClaudeVisionAnalyzer(),
-            GPT4oAnalyzer(),
-            YOLOAnalyzer("model.onnx"),
-        ])
-        results = pipeline.run("site_photo.jpg")
-        pipeline.print_report(results)
     """
 
     def __init__(self, analyzers: list[BaseAnalyzer]):
