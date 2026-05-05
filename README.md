@@ -1,0 +1,3 @@
+## Notes
+
+L'analisi sperimentale ha dimostrato che l'inferenza singola di YOLOv11, pur essendo performante, presenta criticità in termini di falsi positivi in scenari complessi. Al contempo, l'uso di LLM multimodali (GPT-4o) risulta economicamente insostenibile per il monitoraggio real-time. Si propone pertanto un'architettura ibrida: YOLO funge da trigger di primo livello, mentre la validazione della violazione viene delegata a un sistema di tracking temporale e, solo in casi di incertezza, a un modello Vision-Encoder specializzato (Florence-2 o Moondream).
