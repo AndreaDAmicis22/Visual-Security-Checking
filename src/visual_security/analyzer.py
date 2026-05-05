@@ -29,8 +29,8 @@ import cv2 as cv
 VIOLATION_LABELS = [
     "no_helmet",
     "no_vest",
-    "no_gloves",
-    "no_boots",
+    "no_glove",
+    "no_boot",
     "unsafe_behavior",
     "restricted_area",
 ]
@@ -38,8 +38,8 @@ VIOLATION_LABELS = [
 PPE_LABELS = [
     "helmet",
     "vest",
-    "gloves",
-    "boots",
+    "glove",
+    "boot",
     "person",
 ]
 
@@ -237,75 +237,6 @@ Return ONLY the JSON, no markdown fences, no explanation."""
 
 
 # ---------------------------------------------------------------------------
-# Azure AI Vision Analyzer (Foundry Endpoint)
-# ---------------------------------------------------------------------------
-class AzureAIVisionAnalyzer(BaseAnalyzer):
-    """
-    Uses Azure AI Vision 4.0 on Foundry.
-    Endpoint: https://foundry-multimodal.cognitiveservices.azure.com/
-    """
-
-    def __init__(self, api_key: str | None = None, endpoint: str | None = None):
-        super().__init__("Azure-AI-Vision")
-        self.api_key = api_key or os.getenv("AZURE_VISION_KEY", "")
-        self.endpoint = endpoint or "https://foundry-multimodal.cognitiveservices.azure.com/"
-
-    def _run_inference(self, image_path: str) -> list[Detection]:
-        if not self.api_key:
-            msg = "AZURE_VISION_KEY not set"
-            raise RuntimeError(msg)
-
-        with open(image_path, "rb") as f:
-            image_data = f.read()
-
-        params = urllib.parse.urlencode({"features": "people,objects", "api-version": "2023-10-01"})
-        url = f"{self.endpoint.rstrip('/')}/computervision/imageanalysis:analyze?{params}"
-
-        req = urllib.request.Request(
-            url,
-            data=image_data,
-            headers={
-                "Content-Type": "application/octet-stream",
-                "Ocp-Apim-Subscription-Key": self.api_key,
-            },
-        )
-
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                data = json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            # Utile per il debug se restituisce 401 o 404
-            error_msg = e.read().decode()
-            msg_0 = f"Azure API Error: {e.code} - {error_msg}"
-            raise RuntimeError(msg_0)
-
-        detections = []
-        # Objects detected (helmets, vests, tools, etc.)
-        for obj in data.get("objectsResult", {}).get("values", []):
-            for tag in obj.get("tags", []):
-                name = tag["name"].lower().replace(" ", "_")
-                # Map Azure object names to our label schema
-                label = _azure_label_map(name)
-                bb = obj.get("boundingBox", {})
-                bbox = None
-                if bb:
-                    x, y, w, h = bb.get("x", 0), bb.get("y", 0), bb.get("w", 0), bb.get("h", 0)
-                    bbox = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
-                detections.append(Detection(label=label, confidence=tag["confidence"], bbox=bbox))
-
-        # People detected — flag as "person" if no PPE context
-        for person in data.get("peopleResult", {}).get("values", []):
-            bb = person.get("boundingBox", {})
-            bbox = None
-            if bb:
-                x, y, w, h = bb.get("x", 0), bb.get("y", 0), bb.get("w", 0), bb.get("h", 0)
-                bbox = [[x, y], [x + w, y], [x + w, y + h], [x, y + h]]
-            detections.append(Detection(label="person", confidence=person.get("confidence", 0.9), bbox=bbox))
-
-        return detections
-
-
-# ---------------------------------------------------------------------------
 # Foundry GPT-4o Analyzer
 # ---------------------------------------------------------------------------
 class FoundryGPT4oAnalyzer(BaseAnalyzer):
@@ -367,38 +298,6 @@ class FoundryGPT4oAnalyzer(BaseAnalyzer):
                 Detection(label=item.get("label", "unknown"), confidence=float(item.get("confidence", 0.5)), bbox=None)
             )
         return detections
-
-
-# ---------------------------------------------------------------------------
-# Multi-model runner
-# ---------------------------------------------------------------------------
-def _azure_label_map(azure_name: str) -> str:
-    """Map Azure Computer Vision object names to our safety label schema."""
-    _MAP = {
-        "helmet": "helmet",
-        "hard_hat": "helmet",
-        "hardhat": "helmet",
-        "safety_helmet": "helmet",
-        "construction_helmet": "helmet",
-        "vest": "vest",
-        "safety_vest": "vest",
-        "high_visibility_vest": "vest",
-        "hi-vis_vest": "vest",
-        "reflective_vest": "vest",
-        "glove": "gloves",
-        "gloves": "gloves",
-        "safety_gloves": "gloves",
-        "boot": "boots",
-        "boots": "boots",
-        "safety_boot": "boots",
-        "person": "person",
-        "man": "person",
-        "woman": "person",
-        "worker": "person",
-        "human": "person",
-        "construction_worker": "person",
-    }
-    return _MAP.get(azure_name, azure_name)
 
 
 class SafetyAnalyzerPipeline:
