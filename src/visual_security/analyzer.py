@@ -78,14 +78,30 @@ class AnalysisResult:
     def violation_labels(self) -> list[str]:
         return [d.label for d in self.violations]
 
+    # def summary(self) -> str:
+    #     if self.error:
+    #         return f"[{self.model_name}] ERROR: {self.error}"
+    #     v = len(self.violations)
+    #     t = len(self.detections)
+    #     return f"[{self.model_name}] {t} detections, {v} violation(s) in {self.inference_time_ms:.1f}ms" + (
+    #         f" → {self.violation_labels}" if v else ""
+    #     )
+
     def summary(self) -> str:
         if self.error:
             return f"[{self.model_name}] ERROR: {self.error}"
+
         v = len(self.violations)
         t = len(self.detections)
-        return f"[{self.model_name}] {t} detections, {v} violation(s) in {self.inference_time_ms:.1f}ms" + (
-            f" → {self.violation_labels}" if v else ""
-        )
+
+        det_list = ", ".join([f"{d.label}({d.confidence:.2f})" for d in self.detections])
+
+        base_info = f"[{self.model_name}] {t} detections ({det_list}) in {self.inference_time_ms:.1f}ms"
+
+        if v:
+            return base_info + f" | {v} VIOLATION(S) FOUND: {self.violation_labels}"
+
+        return base_info
 
 
 # ---------------------------------------------------------------------------
@@ -142,15 +158,7 @@ class YOLOAnalyzer(BaseAnalyzer):
 
     # Map from dataset class index → label name
     # Update this to match your actual data.yaml class order
-    DEFAULT_CLASS_NAMES = [
-        "helmet",
-        "no_helmet",
-        "vest",
-        "no_vest",
-        "person",
-        "gloves",
-        "boots",
-    ]
+    DEFAULT_CLASS_NAMES = ["Glove", "Helmet", "Non-Helmet", "Person", "Shoe", "Vest", "Bare-arm"]
 
     def __init__(
         self,
@@ -212,14 +220,14 @@ Analyze the image and detect PPE (Personal Protective Equipment) violations and 
 
 For each person visible, check for:
 - Helmet/hard hat (missing = no_helmet violation)
-- High-visibility vest (missing = no_vest violation)
-- Safety gloves (missing = no_gloves violation)
-- Safety boots (missing = no_boots violation)
+- High-visibility vest or jacket (missing = no_vest violation)
+- Safety glove (missing = no_glove violation)
+- Safety boot (missing = no_boot violation)
 - Any unsafe posture, action, or presence in restricted areas (= unsafe_behavior)
 
 Respond ONLY with a JSON array. Each element has:
 {
-  "label": "<one of: no_helmet, no_vest, no_gloves, no_boots, unsafe_behavior, helmet, vest, gloves, boots, person>",
+  "label": "<one of: no_helmet, no_vest, no_glove, no_boot, unsafe_behavior, helmet, vest, glove, boot, person>",
   "confidence": <float 0.0-1.0>,
   "description": "<brief description>"
 }
@@ -250,7 +258,7 @@ class AzureAIVisionAnalyzer(BaseAnalyzer):
         with open(image_path, "rb") as f:
             image_data = f.read()
 
-        params = urllib.parse.urlencode({"features": "people,objects", "api-version": "2023-02-01-preview"})
+        params = urllib.parse.urlencode({"features": "people,objects", "api-version": "2023-10-01"})
         url = f"{self.endpoint.rstrip('/')}/computervision/imageanalysis:analyze?{params}"
 
         req = urllib.request.Request(
@@ -262,8 +270,14 @@ class AzureAIVisionAnalyzer(BaseAnalyzer):
             },
         )
 
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read())
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            # Utile per il debug se restituisce 401 o 404
+            error_msg = e.read().decode()
+            msg_0 = f"Azure API Error: {e.code} - {error_msg}"
+            raise RuntimeError(msg_0)
 
         detections = []
         # Objects detected (helmets, vests, tools, etc.)
