@@ -26,22 +26,9 @@ import cv2 as cv
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
-VIOLATION_LABELS = [
-    "no_helmet",
-    "no_vest",
-    "no_glove",
-    "no_boot",
-    "unsafe_behavior",
-    "restricted_area",
-]
+VIOLATION_LABELS = ["Non-Helmet", "Bare-arm", "no_helmet", "no_vest", "unsafe_behavior"]
 
-PPE_LABELS = [
-    "helmet",
-    "vest",
-    "glove",
-    "boot",
-    "person",
-]
+PPE_LABELS = ["Glove", "Helmet", "Person", "Shoe", "Vest"]
 
 ALL_LABELS = VIOLATION_LABELS + PPE_LABELS
 
@@ -215,16 +202,20 @@ class YOLOAnalyzer(BaseAnalyzer):
         return detections
 
 
+# ---------------------------------------------------------------------------
+# Foundry GPT-4o Analyzer
+# ---------------------------------------------------------------------------
 _SAFETY_SYSTEM_PROMPT = """You are a construction site safety inspector AI.
 Analyze the image and detect PPE (Personal Protective Equipment) violations and unsafe behaviors.
 
 For each person visible, check for:
 - Helmet/hard hat (missing = no_helmet violation)
 - High-visibility vest or jacket (missing = no_vest violation)
-- Safety glove (missing = no_glove violation)
-- Safety boot (missing = no_boot violation)
+- Safety glove (missing = no_glove violation) (check each hand)
+- Safety boot (missing = no_boot violation) (check each foot)
 - Any unsafe posture, action, or presence in restricted areas (= unsafe_behavior)
 
+Return one single detection for each hand and foot.
 Respond ONLY with a JSON array. Each element has:
 {
   "label": "<one of: no_helmet, no_vest, no_glove, no_boot, unsafe_behavior, helmet, vest, glove, boot, person>",
@@ -236,9 +227,6 @@ If no people or violations are found, return an empty array [].
 Return ONLY the JSON, no markdown fences, no explanation."""
 
 
-# ---------------------------------------------------------------------------
-# Foundry GPT-4o Analyzer
-# ---------------------------------------------------------------------------
 class FoundryGPT4oAnalyzer(BaseAnalyzer):
     """
     Uses GPT-4o deployed on Foundry.
@@ -300,6 +288,222 @@ class FoundryGPT4oAnalyzer(BaseAnalyzer):
         return detections
 
 
+# ---------------------------------------------------------------------------
+# Florence-2 Local Analyzer (Validator)
+# ---------------------------------------------------------------------------
+class Florence2Analyzer(BaseAnalyzer):
+    """
+    Small-VLM local validator.
+    Use this to confirm YOLO detections using natural language prompts.
+    Requires: transformers, einops, timm
+    """
+
+    def __init__(self, model_id: str = "microsoft/Florence-2-base", device: str = "cpu"):
+        super().__init__("Florence-2-Validator")
+        self.device = device
+        self.model_id = model_id
+        self._model = None
+        self._processor = None
+
+    def _load_model(self):
+        if self._model is not None:
+            return
+        from transformers import AutoModelForCausalLM, AutoProcessor
+
+        self._processor = AutoProcessor.from_pretrained(self.model_id, trust_remote_code=True)
+        self._model = AutoModelForCausalLM.from_pretrained(self.model_id, trust_remote_code=True).to(self.device).eval()
+
+    def _run_inference(self, image_path: str) -> list[Detection]:
+        self._load_model()
+        img = cv.imread(image_path)[:, :, ::-1]
+
+        # Prompt espanso per includere tutto il vocabolario necessario alla validazione
+        prompt = "<CAPTION_TO_PHRASE_GROUNDING> person, safety helmet, high visibility vest, safety gloves, bare arms"
+        prompt = "<DETAILED_CAPTION> person visible from waist up, checking for helmet and vest"
+
+        inputs = self._processor(text=prompt, images=img, return_tensors="pt").to(self.device)
+
+        # Generazione (utilizziamo num_beams per una maggiore precisione nel grounding)
+        generated_ids = self._model.generate(
+            input_ids=inputs["input_ids"], pixel_values=inputs["pixel_values"], max_new_tokens=1024, num_beams=3
+        )
+
+        results = self._processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        parsed_answer = self._processor.post_process_generation(
+            results, task="<CAPTION_TO_PHRASE_GROUNDING>", image_size=(img.shape[1], img.shape[0])
+        )
+
+        detections = []
+        data = parsed_answer.get("<CAPTION_TO_PHRASE_GROUNDING>", {})
+
+        for label, bboxes in zip(data.get("labels", []), data.get("bboxes", []), strict=False):
+            # Normalizzazione etichette per il confronto
+            clean_label = label.lower().strip().replace(" ", "_")
+            # Florence-2 restituisce [x1, y1, x2, y2], convertiamo in 4 punti se necessario per il tuo canvas
+            detections.append(Detection(label=clean_label, confidence=0.85, bbox=bboxes))
+
+        return detections
+
+
+# ---------------------------------------------------------------------------
+# Moondream2 Local VLM Analyzer (Prompt-based)
+# ---------------------------------------------------------------------------
+class MoondreamAnalyzer(BaseAnalyzer):
+    """
+    Tiny VLM for local inference. Supports natural language prompting.
+    Perfect for validating YOLO detections with complex safety logic.
+    Requires: transformers, einops, pillow
+    """
+
+    def __init__(self, model_id: str = "vikhyatk/moondream2", revision: str = "2025-06-21", device: str = "cpu"):
+        super().__init__("Moondream2-Local")
+        self.device = device
+        self.model_id = model_id
+        self.revision = revision
+        self._model = None
+        self._tokenizer = None
+
+    def _load_model(self):
+        if self._model is not None:
+            return
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        # Carichiamo il tokenizer e il modello
+        self._tokenizer = AutoTokenizer.from_pretrained(self.model_id, revision=self.revision)
+        self._model = (
+            AutoModelForCausalLM.from_pretrained(self.model_id, revision=self.revision, trust_remote_code=True)
+            .to(self.device)
+            .eval()
+        )
+
+    def _run_inference(self, image_path: str) -> list[Detection]:
+        self._load_model()
+        from PIL import Image
+
+        image = Image.open(image_path).convert("RGB")
+        enc_image = self._model.encode_image(image)
+
+        # Moondream ha un metodo dedicato per rispondere alle domande
+        answer = self._model.answer_question(enc_image, _SAFETY_SYSTEM_PROMPT, self._tokenizer)
+
+        detections = []
+        try:
+            # Pulizia minima se il modello aggiunge chiacchiere
+            clean_answer = answer.strip()
+            if "```json" in clean_answer:
+                clean_answer = clean_answer.split("```json")[1].split("```")[0]
+
+            items = json.loads(clean_answer)
+            if isinstance(items, dict):
+                items = [items]  # se restituisce un solo oggetto
+
+            for item in items:
+                detections.append(
+                    Detection(
+                        label=item.get("label", "unknown"),
+                        confidence=float(item.get("confidence", 0.7)),
+                        bbox=None,  # Moondream2 standard non restituisce bbox precisi come Florence
+                    )
+                )
+        except:
+            # Se il parsing fallisce, facciamo un controllo testuale semplice
+            if "no_helmet" in answer.lower():
+                detections.append(Detection(label="no_helmet", confidence=0.8))
+
+        return detections
+
+
+# ---------------------------------------------------------------------------
+# Temporal Persistence Tracker
+# ---------------------------------------------------------------------------
+class PersistenceTracker:
+    """
+    Tracks violations over time to reduce false positives.
+    An alert is only triggered if a violation persists for N frames.
+    """
+
+    def __init__(self, threshold_frames: int = 5):
+        self.threshold_frames = threshold_frames
+        self.active_violations = {}  # {label: count}
+
+    def update(self, current_violations: list[str]) -> list[str]:
+        confirmed = []
+        # Incrementa contatori per violazioni attuali
+        for v in current_violations:
+            self.active_violations[v] = self.active_violations.get(v, 0) + 1
+            if self.active_violations[v] >= self.threshold_frames:
+                confirmed.append(v)
+
+        # Decrementa o rimuovi violazioni non viste in questo frame
+        for v in list(self.active_violations.keys()):
+            if v not in current_violations:
+                self.active_violations[v] -= 1
+                if self.active_violations[v] <= 0:
+                    del self.active_violations[v]
+
+        return confirmed
+
+
+# ---------------------------------------------------------------------------
+# Hybrid Cascade Pipeline
+# ---------------------------------------------------------------------------
+# Mappa la violazione di YOLO al DPI positivo che Florence-2 dovrebbe trovare
+CROSS_VALIDATION_MAP = {
+    "Non-Helmet": "safety_helmet",
+    "Non-Vest": "safety_vest",  # Se YOLO avesse Non-Vest
+    "Bare-arm": "arm",  # Per verificare se la pelle è scoperta
+    "Glove": "glove",  # Per confermare la presenza
+}
+
+
+class SafetyHybridPipeline:
+    def __init__(self, primary_yolo: YOLOAnalyzer, validator_vlm: Florence2Analyzer):
+        self.yolo = primary_yolo
+        self.validator = validator_vlm
+        # Soglia di persistenza: 10 frame di fila prima di chiamare il VLM
+        self.tracker = PersistenceTracker(threshold_frames=10)
+
+    def analyze_frame(self, image_path: str) -> dict:
+        # Step 1: YOLO Inference
+        yolo_res = self.yolo.analyze(image_path)
+
+        # Estraiamo i nomi delle violazioni rilevate (es. "Non-Helmet", "Bare-arm")
+        current_violations = [d.label for d in yolo_res.violations]
+
+        # Step 2: Temporal Filtering (Evitiamo glitch momentanei)
+        confirmed_by_tracker = self.tracker.update(current_violations)
+
+        final_result = {"yolo_detections": yolo_res.detections, "status": "SAFE", "validated_violations": [], "alerts": []}
+
+        # Step 3: Validazione con Florence-2
+        if confirmed_by_tracker:
+            print(f"[*] Validating persistent violations: {confirmed_by_tracker}...")
+            vlm_res = self.validator.analyze(image_path)
+            vlm_labels = [d.label for d in vlm_res.detections]
+
+            for v_label in confirmed_by_tracker:
+                # Esempio logico: se YOLO vede "Non-Helmet"
+                # Florence-2 DEVE trovare "safety_helmet" per dire che è SAFE.
+                # Se NON lo trova, confermiamo l'allerta.
+
+                if v_label == "Non-Helmet":
+                    if "safety_helmet" not in vlm_labels:
+                        final_result["validated_violations"].append("MISSING_HELMET")
+                        final_result["status"] = "ALERT"
+
+                elif v_label == "Vest":  # Se YOLO fosse incerto
+                    if "safety_vest" in vlm_labels:
+                        # Conferma positiva
+                        pass
+
+                # Aggiungi qui altre logiche per Bare-arm o Glove...
+
+        return final_result
+
+
+# ---------------------------------------------------------------------------
+# First Pipeline
+# ---------------------------------------------------------------------------
 class SafetyAnalyzerPipeline:
     """
     Runs multiple analyzers on one or more images and collects results.
