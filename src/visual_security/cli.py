@@ -44,7 +44,6 @@ load_dotenv()
 
 def _build_analyzers(model_arg: str, yolo_model: str | None = None):
     from src.visual_security.analyzer import (
-        AzureAIVisionAnalyzer,
         FoundryGPT4oAnalyzer,
         YOLOAnalyzer,
     )
@@ -64,14 +63,6 @@ def _build_analyzers(model_arg: str, yolo_model: str | None = None):
             analyzers.append(FoundryGPT4oAnalyzer(api_key=key, endpoint=url))
         else:
             print("[WARN] AZURE_OPENAI_KEY not set, skipping Foundry GPT-4o")
-
-    if model_arg in ("vision", "all"):
-        key = os.getenv("AZURE_VISION_KEY")
-        endpoint = os.getenv("AZURE_VISION_ENDPOINT")
-        if key:
-            analyzers.append(AzureAIVisionAnalyzer(api_key=key, endpoint=endpoint))
-        else:
-            print("[WARN] AZURE_VISION_KEY not set, skipping Azure AI Vision")
 
     return analyzers
 
@@ -118,6 +109,42 @@ def cmd_benchmark(args):
     for analyzer in analyzers:
         result = benchmark_latency(analyzer, args.image, n_runs=args.runs)
         print(json.dumps(result, indent=2))
+
+
+def cmd_track(args):
+    """
+    Real-time video tracking with the hybrid cascade pipeline.
+
+    Example:
+        python -m src.visual_security.cli track \\
+            --yolo-model weights/best.onnx \\
+            --source rtsp://camera1 \\
+            --vlm florence2 \\
+            --save-output output/annotated.mp4 \\
+            --alert-log output/alerts.json
+    """
+    from src.visual_security.video_tracker import build_hybrid_tracker
+
+    tracker = build_hybrid_tracker(
+        yolo_model_path=args.yolo_model,
+        vlm_backend=args.vlm,
+        vlm_device=args.device,
+        persistence_frames=args.persistence,
+        skip_frames=args.skip_frames,
+        display=not args.no_display,
+        save_output=args.save_output,
+        alert_log=args.alert_log,
+        yolo_conf=args.conf,
+    )
+
+    source = int(args.source) if args.source.isdigit() else args.source
+    alerts = tracker.run(source)
+
+    print(f"\n{'=' * 60}")
+    print(f"Tracking complete — {len(alerts)} confirmed alert(s) detected.")
+    print(f"{'=' * 60}")
+    for a in alerts:
+        print(a.summary())
 
 
 def cmd_costs(args):
@@ -227,6 +254,24 @@ def main():
     p.add_argument("--model", default="gpt4o", choices=["yolo", "gpt4o", "vision", "all"])
     p.add_argument("--yolo-model", default=None)
     p.add_argument("--runs", type=int, default=10)
+
+    # track
+    p = sub.add_parser("track", help="Real-time video safety tracking (hybrid pipeline)")
+    p.add_argument("--yolo-model", required=True, help="Path to YOLO ONNX weights")
+    p.add_argument("--source", default="0", help="Video source: file path, RTSP URL, or webcam index (default: 0)")
+    p.add_argument(
+        "--vlm",
+        default="none",
+        choices=["florence2", "moondream", "none"],
+        help="Local VLM validator for confirmed violations (default: none)",
+    )
+    p.add_argument("--device", default="cpu", help="Torch device for VLM (cpu/cuda/mps)")
+    p.add_argument("--persistence", type=int, default=8, help="Consecutive frames before triggering alert (default: 8)")
+    p.add_argument("--skip-frames", type=int, default=1, help="Run YOLO every N frames (1=every frame, 2=every other, …)")
+    p.add_argument("--conf", type=float, default=0.40, help="YOLO confidence threshold (default: 0.40)")
+    p.add_argument("--save-output", default=None, help="Path to save annotated video (e.g. output/annotated.mp4)")
+    p.add_argument("--alert-log", default=None, help="Path to save JSON alert log (e.g. output/alerts.json)")
+    p.add_argument("--no-display", action="store_true", help="Disable live OpenCV window (useful for headless servers)")
 
     # costs
     p = sub.add_parser("costs", help="Show cost estimates")
