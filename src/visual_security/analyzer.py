@@ -11,7 +11,6 @@ Supports:
 from __future__ import annotations
 
 import base64
-import contextlib
 import json
 import os
 import sys
@@ -393,31 +392,38 @@ class Florence2Analyzer(BaseAnalyzer):
 
 
 # ---------------------------------------------------------------------------
-# Moondream2 Local VLM Analyzer (Prompt-based)
+# PaliGemma2 Local VLM Analyzer
 # ---------------------------------------------------------------------------
-class MoondreamAnalyzer(BaseAnalyzer):
+class PaliGemmaAnalyzer(BaseAnalyzer):
     """
-    Moondream2 per inferenza locale con prompt personalizzati.
-    Usa l'API nativa di Moondream (moondream.from_pretrained) invece di
-    AutoModelForCausalLM generico, che causava il warning 'moondream1 type'.
+    PaliGemma2 (Google) per validazione PPE in locale.
 
-    Il metodo principale usato dal video_tracker è query(image, prompt)
-    che bypassa il _run_inference standard e permette prompt dinamici
-    per-persona (es. "verifica se mancano Helmet, Glove")
+    Perché PaliGemma2 invece di Moondream2 (rimosso):
+    - Usa transformers standard (PaliGemmaForConditionalGeneration)
+    - NESSUN trust_remote_code → nessun pyvips / libvips
+    - 3B params, ottimo per VQA su immagini ritagliate
+    - Gira su CPU (lento ma funziona) o CUDA/MPS
+
+    Modello: google/paligemma2-3b-pt-224  (224px, più leggero)
+    Alternativa più precisa: google/paligemma2-3b-pt-448
+
+    Setup:
+        pip install transformers torch pillow
+        # Accettare la licenza su HuggingFace (una tantum):
+        # https://huggingface.co/google/paligemma2-3b-pt-224
+        # Poi settare HF_TOKEN nel .env
     """
 
     def __init__(
         self,
-        model_id: str = "vikhyatk/moondream2",
-        revision: str = "2025-01-09",  # ultima revision stabile con API nativa
+        model_id: str = "google/paligemma2-3b-pt-224",
         device: str = "cpu",
     ):
-        super().__init__("Moondream2-Local")
-        self.device = device
+        super().__init__("PaliGemma2-Local")
         self.model_id = model_id
-        self.revision = revision
+        self.device = device
         self._model = None
-        self._tokenizer = None
+        self._processor = None
 
     def _load_model(self):
         if self._model is not None:
@@ -427,49 +433,56 @@ class MoondreamAnalyzer(BaseAnalyzer):
         hf_token = os.getenv("HF_TOKEN")
 
         import torch
-        from transformers import AutoTokenizer
+        from transformers import PaliGemmaForConditionalGeneration, PaliGemmaProcessor
 
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_id, token=hf_token, trust_remote_code=True)
-
+        self._processor = PaliGemmaProcessor.from_pretrained(
+            self.model_id,
+            token=hf_token,
+        )
         self._model = (
-            AutoModelForCausalLM.from_pretrained(
+            PaliGemmaForConditionalGeneration.from_pretrained(
                 self.model_id,
-                revision=self.revision,
-                trust_remote_code=True,
                 token=hf_token,
-                torch_dtype=torch.float32,
+                torch_dtype=torch.bfloat16 if self.device != "cpu" else torch.float32,
             )
             .to(self.device)
             .eval()
         )
 
-        if hasattr(self._model, "vision_encoder"):
-            with contextlib.suppress(Exception):
-                self._model.vision_encoder.use_vips = False
-
     def query(self, image_source: str | np.ndarray, prompt: str) -> str:
         """
         Esegue una domanda in linguaggio naturale sull'immagine.
         Ritorna la risposta grezza come stringa.
-        Usato da _moondream_validate nel video_tracker.
+        Usato da _vlm_validate nel video_tracker.
         """
         self._load_model()
+        import torch
+
         pil_img = self._to_pil(image_source)
-        try:
-            enc = self._model.encode_image(pil_img)
-            return self._model.query(enc, prompt)["answer"]
-        except (AttributeError, TypeError):
-            enc = self._model.encode_image(pil_img)
-            return self._model.answer_question(enc, prompt, self._tokenizer)
+
+        # PaliGemma usa un prefisso speciale per VQA
+        # PaliGemma richiede il token <image> all'inizio del prompt
+        inputs = self._processor(
+            images=pil_img,
+            text=f"<image>{prompt}",
+            return_tensors="pt",
+        ).to(self.device)
+
+        with torch.no_grad():
+            output_ids = self._model.generate(
+                **inputs,
+                max_new_tokens=100,
+                do_sample=False,
+            )
+
+        # Decodifica solo i token generati (non il prompt)
+        generated = output_ids[0][inputs["input_ids"].shape[1] :]
+        return self._processor.decode(generated, skip_special_tokens=True).strip()
 
     def _run_inference(self, image_source: str | np.ndarray) -> list[Detection]:
-        """
-        Chiamata generica (compatibilità con SafetyAnalyzerPipeline).
-        Usa il prompt generico di ispezione sicurezza.
-        Per uso nel video_tracker, usare query() con prompt specifico.
-        """
+        """Compatibilità con SafetyAnalyzerPipeline."""
         answer = self.query(image_source, _SAFETY_SYSTEM_PROMPT)
-        detections = []
+        detections: list[Detection] = []
         try:
             clean = answer.strip()
             if "```json" in clean:
@@ -488,15 +501,19 @@ class MoondreamAnalyzer(BaseAnalyzer):
                     )
                 )
         except Exception:
-            for kw, label in [
+            for kw, lbl in [
                 ("no_helmet", "no_helmet"),
                 ("no_vest", "no_vest"),
                 ("no_glove", "no_glove"),
                 ("no_boot", "no_boot"),
             ]:
                 if kw in answer.lower():
-                    detections.append(Detection(label=label, confidence=0.7))
+                    detections.append(Detection(label=lbl, confidence=0.7))
         return detections
+
+
+# Alias per retrocompatibilità
+MoondreamAnalyzer = PaliGemmaAnalyzer
 
 
 # ---------------------------------------------------------------------------

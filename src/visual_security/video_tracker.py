@@ -1,5 +1,5 @@
 """
-Real-Time Video Safety Tracker — pipeline ibrida YOLO + PPEChecker + Moondream (opzionale).
+Real-Time Video Safety Tracker — pipeline ibrida YOLO + PPEChecker + PaliGemma2 (opzionale).
 
 Architettura:
 
@@ -14,7 +14,7 @@ Architettura:
                                       └───────────┬────────────┘
                                                   │ violazioni confermate
                                       ┌───────────▼────────────┐
-                                      │  Moondream2 (locale)   │  ← opzionale
+                                      │  PaliGemma2 (locale)   │  ← opzionale
                                       │  crop persona + prompt │
                                       └───────────┬────────────┘
                                                   │ FrameAlert
@@ -40,7 +40,7 @@ from .person_ppe_checker import PersonPPEChecker, PersonPPEResult
 if TYPE_CHECKING:
     import numpy as np
 
-    from .analyzer import BaseAnalyzer, MoondreamAnalyzer, YOLOAnalyzer
+    from .analyzer import BaseAnalyzer, PaliGemmaAnalyzer, YOLOAnalyzer
 
 
 # ── Alert ─────────────────────────────────────────────────────────────────────
@@ -58,9 +58,9 @@ class FrameAlert:
 
     def summary(self) -> str:
         viol = self.violations
-        suffix = " [Moondream✓]" if self.vlm_confirmed else " [YOLO+tracker]"
+        source = "[YOLO+Tracker+VLM✓]" if self.vlm_confirmed else "[YOLO+Tracker]"
         parts = " | ".join(p.summary() for p in viol)
-        return f"[t={self.timestamp_s:.1f}s frame={self.frame_idx}] {len(viol)} violazione/i{suffix}: {parts}"
+        return f"[t={self.timestamp_s:.1f}s frame={self.frame_idx}] {len(viol)} violazione/i {source}: {parts}"
 
 
 # ── Persistence tracker ───────────────────────────────────────────────────────
@@ -135,8 +135,8 @@ class VideoViolationTracker:
         return sum(dq) / len(dq)
 
 
-# ── Moondream VLM validator ───────────────────────────────────────────────────
-_MOONDREAM_PROMPT_TEMPLATE = (
+# ── PaliGemma2 VLM validator ───────────────────────────────────────────────────
+_VLM_PROMPT_TEMPLATE = (
     "This image shows a construction worker cropped from a safety camera. "
     "The following PPE items were flagged as potentially MISSING: {missing}. "
     "For each item, answer whether it is truly MISSING (not visible at all) or PRESENT. "
@@ -145,28 +145,48 @@ _MOONDREAM_PROMPT_TEMPLATE = (
 )
 
 
-def _moondream_validate(
-    vlm: MoondreamAnalyzer,
+def _vlm_validate(
+    vlm: PaliGemmaAnalyzer,
     image_source: str | np.ndarray,
     missing_ppe: list[str],
 ) -> tuple[bool, str]:
     """
-    Usa MoondreamAnalyzer.query() con prompt specifico per i PPE mancanti.
+    Usa PaliGemmaAnalyzer.query() con prompt specifico per i PPE mancanti.
     Ritorna (almeno_uno_confermato_mancante, risposta_raw).
+
+    In caso di errore del VLM → return False: la decisione viene lasciata
+    al solo YOLO+tracker, senza confermare automaticamente la violazione.
     """
-    prompt = _MOONDREAM_PROMPT_TEMPLATE.format(missing=", ".join(missing_ppe))
+    prompt = _VLM_PROMPT_TEMPLATE.format(missing=", ".join(missing_ppe))
     try:
         answer = vlm.query(image_source, prompt)
-        print(f"VLM Answer raw: {answer}")
+        print(f"[VLM] risposta raw: {answer}")
+    except Exception as e:
+        # VLM non disponibile o errore di inferenza → skip, non confermare
+        print(f"[VLM] errore inferenza, skip: {e}")
+        return False, f"[inference error: {e}]"
+
+    # ── Parsing JSON ──────────────────────────────────────────────────────────
+    try:
         clean = answer.strip()
+        # Rimuovi eventuale code fence markdown
         if "```" in clean:
-            clean = clean.split("```")[1].lstrip("json").strip()
+            block = clean.split("```")[1]
+            clean = block.lstrip("json").strip()
+        # Cerca la prima coppia {...} nel testo nel caso il modello aggiunga
+        # testo libero prima o dopo il JSON
+        start = clean.find("{")
+        end = clean.rfind("}") + 1
+        if start != -1 and end > start:
+            clean = clean[start:end]
         data = json.loads(clean)
         confirmed = any(data.get(k, False) for k in missing_ppe)
         return confirmed, answer
     except Exception as e:
-        print(f"VLM error: {e}")
-        return True, f"[parse error: {e}]"
+        # JSON non parseable → il VLM ha risposto in modo libero.
+        # Non confermiamo: lasciamo la decisione al tracker.
+        print(f"[VLM] parsing JSON fallito, skip: {e} | risposta: {answer!r}")
+        return False, f"[parse error: {e}]"
 
 
 # ── Drawing ───────────────────────────────────────────────────────────────────
@@ -241,7 +261,7 @@ class VideoSafetyTracker:
     Parameters
     ----------
     yolo_analyzer       YOLOAnalyzer configurato.
-    vlm_validator       MoondreamAnalyzer opzionale per validazione crop.
+    vlm_validator       PaliGemmaAnalyzer opzionale per validazione crop.
     ppe_checker         PersonPPEChecker (default: set PPE completo).
     persistence_frames  Frame positivi necessari nella window per confermare.
     window_frames       Larghezza sliding window (≥ persistence_frames).
@@ -381,25 +401,32 @@ class VideoSafetyTracker:
     # ── VLM ───────────────────────────────────────────────────────────────────
     def _make_alert(self, frame, frame_idx, ts, all_ppr, confirmed) -> FrameAlert:
         alert = FrameAlert(frame_idx=frame_idx, timestamp_s=ts, person_results=all_ppr)
+
         if self.vlm is None:
-            alert.vlm_confirmed = True
+            # Nessun VLM configurato: la violazione è confermata dal solo tracker
+            alert.vlm_confirmed = False
+            alert.vlm_response = "VLM non configurato — decisione da YOLO+tracker"
             return alert
 
-        any_confirmed = False
+        vlm_confirmed_count = 0
         vlm_resp_parts: list[str] = []
+
         for pr in confirmed:
             crop = self._crop(frame, pr, pad_ratio=0.30)
             if crop is None:
-                any_confirmed = True
+                # Crop non riuscito (bbox fuori frame): skip VLM per questa persona
+                vlm_resp_parts.append(f"Person#{pr.person_idx}: [crop non disponibile, skip VLM]")
                 continue
-            # crop è un np.ndarray BGR — niente disco, passato direttamente
-            ok, resp = _moondream_validate(self.vlm, crop, pr.missing_ppe)
+
+            ok, resp = _vlm_validate(self.vlm, crop, pr.missing_ppe)
             self._vlm_calls += 1
             if ok:
-                any_confirmed = True
+                vlm_confirmed_count += 1
             vlm_resp_parts.append(f"Person#{pr.person_idx}: {resp}")
 
-        alert.vlm_confirmed = any_confirmed
+        # vlm_confirmed=True solo se almeno una persona è stata confermata
+        # dal VLM con risposta valida — non per default o per errori
+        alert.vlm_confirmed = vlm_confirmed_count > 0
         alert.vlm_response = " | ".join(vlm_resp_parts) or None
         return alert
 
@@ -407,7 +434,7 @@ class VideoSafetyTracker:
     def _crop(frame: np.ndarray, pr: PersonPPEResult, pad_ratio: float = 0.30) -> np.ndarray | None:
         """
         Ritaglie la persona dal frame espandendo i bordi del 30% per fornire
-        contesto al VLM (Moondream) ed evitare tagli su elmetti o scarpe.
+        contesto al VLM (PaliGemma2) ed evitare tagli su elmetti o scarpe.
         """
         if pr.person_bbox is None:
             return None
@@ -455,7 +482,7 @@ class VideoSafetyTracker:
 # ── Factory ───────────────────────────────────────────────────────────────────
 def build_hybrid_tracker(
     yolo_model_path: str,
-    vlm_backend: str = "none",  # "moondream" | "none"
+    vlm_backend: str = "none",  # "paligemma" | "none"
     vlm_device: str = "cpu",
     persistence_frames: int = 4,
     window_frames: int = 7,
@@ -484,12 +511,12 @@ def build_hybrid_tracker(
     yolo = YOLOAnalyzer(model_path=yolo_model_path, conf_threshold=yolo_conf)
 
     vlm: BaseAnalyzer | None = None
-    if vlm_backend == "moondream":
-        from .analyzer import MoondreamAnalyzer
+    if vlm_backend == "paligemma":
+        from .analyzer import PaliGemmaAnalyzer
 
-        vlm = MoondreamAnalyzer(device=vlm_device)
+        vlm = PaliGemmaAnalyzer(device=vlm_device)
     elif vlm_backend not in ("none", ""):
-        msg = f"vlm_backend={vlm_backend!r} non riconosciuto. Usa 'moondream' o 'none'."
+        msg = f"vlm_backend={vlm_backend!r} non riconosciuto. Usa 'paligemma' o 'none'."
         raise ValueError(msg)
 
     return VideoSafetyTracker(
