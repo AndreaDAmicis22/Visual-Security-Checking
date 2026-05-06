@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import cv2 as cv
+import numpy as np
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -98,11 +99,17 @@ class BaseAnalyzer(ABC):
     def __init__(self, model_name: str):
         self.model_name = model_name
 
-    def analyze(self, image_path: str | Path) -> AnalysisResult:
-        image_path = str(image_path)
+    def analyze(self, image_source: "str | Path | np.ndarray") -> AnalysisResult:
+        """
+        Accetta un percorso file (str/Path) oppure un frame già in memoria
+        (np.ndarray BGR, come restituito da cv2.VideoCapture).
+        Nessun file temporaneo viene scritto su disco.
+        """
+        import numpy as _np
+        label = "<ndarray>" if isinstance(image_source, _np.ndarray) else str(image_source)
         start = time.perf_counter()
         try:
-            detections = self._run_inference(image_path)
+            detections = self._run_inference(image_source)
             error = None
         except Exception as e:
             detections = []
@@ -111,26 +118,58 @@ class BaseAnalyzer(ABC):
 
         return AnalysisResult(
             model_name=self.model_name,
-            image_path=image_path,
+            image_path=label,
             detections=detections,
             inference_time_ms=elapsed_ms,
             error=error,
         )
 
     @abstractmethod
-    def _run_inference(self, image_path: str) -> list[Detection]: ...
+    def _run_inference(self, image_source: "str | np.ndarray") -> list[Detection]: ...
+
+    # ── Helpers per VLM che hanno bisogno di bytes/base64 ────────────────────
 
     @staticmethod
-    def _encode_image_base64(image_path: str) -> str:
-        with open(image_path, "rb") as f:
-            return base64.b64encode(f.read()).decode("utf-8")
+    def _to_bgr(image_source: "str | Path | np.ndarray") -> "np.ndarray":
+        """Restituisce sempre un array BGR, da path o da ndarray già in memoria."""
+        import numpy as np
+        if isinstance(image_source, np.ndarray):
+            return image_source
+        img = cv.imread(str(image_source))
+        if img is None:
+            raise ValueError(f"Impossibile leggere l'immagine: {image_source}")
+        return img
 
     @staticmethod
-    def _get_media_type(image_path: str) -> str:
-        ext = Path(image_path).suffix.lower()
-        return {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp", "gif": "image/gif"}.get(
-            ext.lstrip("."), "image/jpeg"
-        )
+    def _to_pil(image_source: "str | Path | np.ndarray"):
+        """Restituisce una PIL Image RGB, da path o da ndarray BGR."""
+        from PIL import Image
+        import numpy as np
+        if isinstance(image_source, np.ndarray):
+            return Image.fromarray(cv.cvtColor(image_source, cv.COLOR_BGR2RGB))
+        return Image.open(str(image_source)).convert("RGB")
+
+    @staticmethod
+    def _to_base64(image_source: "str | Path | np.ndarray") -> tuple[str, str]:
+        """
+        Ritorna (base64_string, media_type).
+        Se ndarray: encode in-memory come JPEG (nessun file su disco).
+        Se path: legge direttamente dal file.
+        """
+        import numpy as np
+        if isinstance(image_source, np.ndarray):
+            ok, buf = cv.imencode(".jpg", image_source)
+            if not ok:
+                raise RuntimeError("Encoding JPEG fallito")
+            b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
+            return b64, "image/jpeg"
+        path = str(image_source)
+        with open(path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        ext = Path(path).suffix.lower().lstrip(".")
+        media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
+                      "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
+        return b64, media_type
 
 
 # ---------------------------------------------------------------------------
@@ -178,13 +217,9 @@ class YOLOAnalyzer(BaseAnalyzer):
             msg = f"Cannot import YOLO ONNX backend: {e}. Make sure the yolo subpackage is on your PYTHONPATH."
             raise RuntimeError(msg)
 
-    def _run_inference(self, image_path: str) -> list[Detection]:
+    def _run_inference(self, image_source: "str | np.ndarray") -> list[Detection]:
         self._load_model()
-        img = cv.imread(image_path)
-        if img is None:
-            msg = f"Cannot read image: {image_path}"
-            raise ValueError(msg)
-
+        img = self._to_bgr(image_source)
         results = self._model.predict(img)
 
         detections = []
@@ -242,13 +277,12 @@ class FoundryGPT4oAnalyzer(BaseAnalyzer):
             or "https://foundry-multimodal.cognitiveservices.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2025-01-01-preview"
         )
 
-    def _run_inference(self, image_path: str) -> list[Detection]:
+    def _run_inference(self, image_source: "str | np.ndarray") -> list[Detection]:
         if not self.api_key:
             msg = "AZURE_OPENAI_KEY not set"
             raise RuntimeError(msg)
 
-        image_data = self._encode_image_base64(image_path)
-        media_type = self._get_media_type(image_path)
+        image_data, media_type = self._to_base64(image_source)
 
         payload = json.dumps(
             {
@@ -313,9 +347,9 @@ class Florence2Analyzer(BaseAnalyzer):
         self._processor = AutoProcessor.from_pretrained(self.model_id, trust_remote_code=True)
         self._model = AutoModelForCausalLM.from_pretrained(self.model_id, trust_remote_code=True).to(self.device).eval()
 
-    def _run_inference(self, image_path: str) -> list[Detection]:
+    def _run_inference(self, image_source: "str | np.ndarray") -> list[Detection]:
         self._load_model()
-        img = cv.imread(image_path)[:, :, ::-1]
+        img = self._to_bgr(image_source)[:, :, ::-1]  # BGR→RGB
 
         # Prompt espanso per includere tutto il vocabolario necessario alla validazione
         prompt = "<CAPTION_TO_PHRASE_GROUNDING> person, safety helmet, high visibility vest, safety gloves, bare arms"
@@ -376,11 +410,9 @@ class MoondreamAnalyzer(BaseAnalyzer):
             .eval()
         )
 
-    def _run_inference(self, image_path: str) -> list[Detection]:
+    def _run_inference(self, image_source: "str | np.ndarray") -> list[Detection]:
         self._load_model()
-        from PIL import Image
-
-        image = Image.open(image_path).convert("RGB")
+        image = self._to_pil(image_source)
         enc_image = self._model.encode_image(image)
 
         # Moondream ha un metodo dedicato per rispondere alle domande

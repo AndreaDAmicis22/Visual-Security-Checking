@@ -1,344 +1,319 @@
 """
-Real-Time Video Safety Tracker  — hybrid cascade pipeline.
+Real-Time Video Safety Tracker — pipeline ibrida YOLO + PPEChecker + Moondream (opzionale).
 
-Architecture:
+Architettura:
 
-  ┌─────────────┐  every N frames   ┌──────────────────────┐
-  │  YOLO(fast) │ ── detections ──► │  PersonPPEChecker    │
-  └─────────────┘                   │  (IoU containment)   │
-                                    └──────────┬───────────┘
-                                               │ PersonPPEResult list
-                                    ┌──────────▼───────────┐
-                                    │  VideoViolationTracker│
-                                    │  (sliding-window per  │
-                                    │   grid-cell+missing)  │
-                                    └──────────┬───────────┘
-                                               │ confirmed violations
-                                    ┌──────────▼───────────┐
-                                    │  VLM Validator        │  (local,
-                                    │  Florence-2 /         │   optional)
-                                    │  Moondream2           │
-                                    └──────────┬───────────┘
-                                               │ FrameAlert
-                                    ┌──────────▼───────────┐
-                                    │  Annotated output     │
-                                    │  (cv2 window / file)  │
-                                    └──────────────────────┘
+  ┌────────────────┐  ogni N frame    ┌────────────────────────┐
+  │  YOLO (veloce) │ ─ detections ──► │  PersonPPEChecker      │
+  └────────────────┘                  │  (containment overlap) │
+                                      └───────────┬────────────┘
+                                                  │ PersonPPEResult list
+                                      ┌───────────▼────────────┐
+                                      │  VideoViolationTracker │
+                                      │  (sliding window)      │
+                                      └───────────┬────────────┘
+                                                  │ violazioni confermate
+                                      ┌───────────▼────────────┐
+                                      │  Moondream2 (locale)   │  ← opzionale
+                                      │  crop persona + prompt │
+                                      └───────────┬────────────┘
+                                                  │ FrameAlert
+                                      ┌───────────▼────────────┐
+                                      │  Output annotato       │
+                                      │  (finestra / file)     │
+                                      └────────────────────────┘
 """
-
 from __future__ import annotations
 
 import time
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Optional
 
 import cv2 as cv
+import numpy as np
 
+from .analyzer import BaseAnalyzer, YOLOAnalyzer
 from .person_ppe_checker import PersonPPEChecker, PersonPPEResult
 
-if TYPE_CHECKING:
-    import numpy as np
 
-    from .analyzer import BaseAnalyzer, YOLOAnalyzer
-
-# ── Alert record ──────────────────────────────────────────────────────────────
-
+# ── Alert ─────────────────────────────────────────────────────────────────────
 
 @dataclass
 class FrameAlert:
-    frame_idx: int
-    timestamp_s: float
+    frame_idx:    int
+    timestamp_s:  float
     person_results: list[PersonPPEResult]
-    vlm_confirmed: bool = False
-    vlm_response: str | None = None
+    vlm_confirmed:  bool = False
+    vlm_response:   Optional[str] = None
 
     @property
     def violations(self) -> list[PersonPPEResult]:
         return [p for p in self.person_results if not p.is_compliant]
 
     def summary(self) -> str:
-        viol = self.violations
-        suffix = " [VLM✓]" if self.vlm_confirmed else " [YOLO+tracker]"
-        parts = "; ".join(p.summary() for p in viol)
-        return f"[t={self.timestamp_s:.1f}s  frame={self.frame_idx}]  {len(viol)} violation(s){suffix}: {parts}"
+        viol   = self.violations
+        suffix = " [Moondream✓]" if self.vlm_confirmed else " [YOLO+tracker]"
+        parts  = " | ".join(p.summary() for p in viol)
+        return (
+            f"[t={self.timestamp_s:.1f}s frame={self.frame_idx}] "
+            f"{len(viol)} violazione/i{suffix}: {parts}"
+        )
 
 
-# ── Persistence / violation tracker ──────────────────────────────────────────
-
+# ── Persistence tracker ───────────────────────────────────────────────────────
 
 class VideoViolationTracker:
     """
-    Sliding-window tracker keyed by (grid_cell, frozenset_of_missing_ppe).
+    Sliding-window tracker per (cella_griglia × PPE_mancanti).
 
-    A violation is "confirmed" once it has appeared in ≥ threshold of the
-    last `window` frames.  This is more robust than requiring *consecutive*
-    frames (a single missed YOLO detection won't reset the counter).
-
-    Parameters
-    ----------
-    threshold_frames : int
-        Minimum number of positive frames inside the window. Default 5.
-    window : int
-        Sliding-window width in frames. Default 8.
-        Set window == threshold_frames for strict consecutive behaviour.
-    grid : int
-        Frame is divided into grid×grid cells for person tracking. Default 6.
-    cooldown_frames : int
-        After an alert fires, suppress new alerts for this many frames
-        for the same key.  Prevents alert spam.  Default 30.
+    Conferma una violazione quando appare in ≥ threshold dei
+    ultimi `window` frame. Più robusto del "N consecutivi"
+    perché tollera singole detection mancate.
     """
 
     def __init__(
         self,
-        threshold_frames: int = 5,
-        window: int = 8,
-        grid: int = 6,
-        cooldown_frames: int = 30,
+        threshold_frames: int = 4,
+        window:           int = 7,
+        grid:             int = 6,
+        cooldown_frames:  int = 30,
     ):
-        self.threshold = threshold_frames
-        self.window = window
-        self.grid = grid
-        self.cooldown = cooldown_frames
+        self.threshold  = threshold_frames
+        self.window     = window
+        self.grid       = grid
+        self.cooldown   = cooldown_frames
+        self._history:  dict[str, deque] = {}
+        self._cooldown: dict[str, int]   = {}
 
-        # key → deque of booleans (True = violation seen in that frame)
-        self._history: dict[str, deque] = {}
-        # key → frames until cooldown expires
-        self._cooldown: dict[str, int] = {}
-
-    # ── Private ───────────────────────────────────────────────────────────────
-
-    def _key(self, pr: PersonPPEResult, frame_w: int, frame_h: int) -> str:
+    def _key(self, pr: PersonPPEResult, fw: int, fh: int) -> str:
         if pr.person_bbox:
-            cx = int(((pr.person_bbox[0] + pr.person_bbox[2]) / 2) / max(frame_w, 1) * self.grid)
-            cy = int(((pr.person_bbox[1] + pr.person_bbox[3]) / 2) / max(frame_h, 1) * self.grid)
-            cx = min(cx, self.grid - 1)
-            cy = min(cy, self.grid - 1)
+            cx = min(int(((pr.person_bbox[0]+pr.person_bbox[2])/2)/max(fw,1)*self.grid), self.grid-1)
+            cy = min(int(((pr.person_bbox[1]+pr.person_bbox[3])/2)/max(fh,1)*self.grid), self.grid-1)
         else:
             cx, cy = -1, -1
-        missing_key = "|".join(sorted(pr.missing_ppe))
-        return f"{cx}:{cy}:{missing_key}"
+        return f"{cx}:{cy}:{'|'.join(sorted(pr.missing_ppe))}"
 
-    # ── Public API ────────────────────────────────────────────────────────────
+    def update(self, person_results: list[PersonPPEResult], fw: int, fh: int
+               ) -> list[PersonPPEResult]:
+        active: set[str] = set()
 
-    def update(
-        self,
-        person_results: list[PersonPPEResult],
-        frame_w: int,
-        frame_h: int,
-    ) -> list[PersonPPEResult]:
-        """
-        Call once per processed frame.
-        Returns the subset of non-compliant persons whose violation is confirmed.
-        """
-        active_keys: set[str] = set()
-
-        # 1. Register violations seen this frame
         for pr in person_results:
             if pr.is_compliant:
                 continue
-            k = self._key(pr, frame_w, frame_h)
-            active_keys.add(k)
+            k = self._key(pr, fw, fh)
+            active.add(k)
             if k not in self._history:
                 self._history[k] = deque(maxlen=self.window)
             self._history[k].append(True)
 
-        # 2. For every tracked key NOT seen this frame → push False
-        for k in list(self._history.keys()):
-            if k not in active_keys:
+        for k in list(self._history):
+            if k not in active:
                 self._history[k].append(False)
-                # Prune keys that have no recent positive frames
                 if not any(self._history[k]):
-                    del self._history[k]
+                    self._history.pop(k, None)
                     self._cooldown.pop(k, None)
 
-        # 3. Tick down cooldowns
-        for k in list(self._cooldown.keys()):
+        for k in list(self._cooldown):
             self._cooldown[k] -= 1
             if self._cooldown[k] <= 0:
                 del self._cooldown[k]
 
-        # 4. A key is "confirmed" when it has enough positives in the window
-        #    AND is not in cooldown
-        confirmed_keys: set[str] = set()
+        confirmed: set[str] = set()
         for k, dq in self._history.items():
-            if k in self._cooldown:
-                continue
-            if sum(dq) >= self.threshold:
-                confirmed_keys.add(k)
-                self._cooldown[k] = self.cooldown  # arm cooldown
+            if k not in self._cooldown and sum(dq) >= self.threshold:
+                confirmed.add(k)
+                self._cooldown[k] = self.cooldown
 
-        # 5. Map back to PersonPPEResult objects
-        return [pr for pr in person_results if not pr.is_compliant and self._key(pr, frame_w, frame_h) in confirmed_keys]
+        return [pr for pr in person_results
+                if not pr.is_compliant and self._key(pr, fw, fh) in confirmed]
 
-    def person_state(
-        self,
-        pr: PersonPPEResult,
-        frame_w: int,
-        frame_h: int,
-    ) -> float:
-        """Return fraction of window frames this person's violation was seen (0–1)."""
-        k = self._key(pr, frame_w, frame_h)
-        dq = self._history.get(k)
+    def fill(self, pr: PersonPPEResult, fw: int, fh: int) -> float:
+        """Frazione della window riempita da positive (0–1)."""
+        dq = self._history.get(self._key(pr, fw, fh))
         if not dq:
             return 0.0
         return sum(dq) / len(dq)
 
 
-# ── Drawing helpers ───────────────────────────────────────────────────────────
+# ── Moondream VLM validator ───────────────────────────────────────────────────
 
-# BGR colours
-_C_GREEN = (40, 200, 60)
-_C_RED = (0, 50, 220)
-_C_YELLOW = (20, 190, 230)
-_C_GREY = (160, 160, 160)
-_C_WHITE = (230, 230, 230)
+_MOONDREAM_PROMPT_TEMPLATE = (
+    "This image shows a construction worker. "
+    "Check if the following PPE items are MISSING from the worker: {missing}. "
+    "Answer ONLY with a JSON object where each key is a PPE item and value is "
+    "true (missing) or false (present). Example: "
+    '{"Helmet": true, "Vest": false, "Glove": true, "Shoe": false}'
+)
 
 
-def _draw_person(
-    img: np.ndarray,
-    pr: PersonPPEResult,
-    confirmed: bool,
-    fill: float,  # 0–1, fraction of window filled
-) -> None:
-    """Draw bounding box + PPE checklist on the frame for one person."""
+def _moondream_validate(
+    vlm: BaseAnalyzer,
+    image_source: "str | np.ndarray",
+    missing_ppe: list[str],
+) -> tuple[bool, str]:
+    """
+    Chiama Moondream sul crop della persona (ndarray BGR o path).
+    Ritorna (confermato, risposta_raw).
+    """
+    import json
+    try:
+        if vlm._model is None:
+            vlm._load_model()
+        prompt = _MOONDREAM_PROMPT_TEMPLATE.format(missing=", ".join(missing_ppe))
+        # Usa il helper unificato — niente file su disco
+        pil_img = BaseAnalyzer._to_pil(image_source)
+        enc = vlm._model.encode_image(pil_img)
+        answer = vlm._model.answer_question(enc, prompt, vlm._tokenizer)
+        clean = answer.strip()
+        if "```" in clean:
+            clean = clean.split("```")[1].lstrip("json").strip()
+        data = json.loads(clean)
+        confirmed = any(data.get(k, False) for k in missing_ppe)
+        return confirmed, answer
+    except Exception as e:
+        return True, f"[error: {e}]"
+
+
+# ── Drawing ───────────────────────────────────────────────────────────────────
+
+_C = {
+    "green":  (40,  200,  60),
+    "red":    (0,    45, 210),
+    "yellow": (20,  190, 230),
+    "white":  (230, 230, 230),
+    "dark":   (20,   20,  20),
+}
+
+
+def _draw_person(img: np.ndarray, pr: PersonPPEResult,
+                 confirmed: bool, fill: float) -> None:
     if pr.person_bbox is None:
         return
-
     x1, y1, x2, y2 = (int(v) for v in pr.person_bbox)
 
     if pr.is_compliant:
-        color = _C_GREEN
-        label = "PPE OK"
-        thickness = 2
+        color, label, thick = _C["green"], "PPE OK", 2
     elif confirmed:
-        color = _C_RED
+        color = _C["red"]
         label = f"ALERT: {', '.join(pr.missing_ppe)}"
-        thickness = 3
+        thick = 3
     else:
-        # pending — colour intensity grows with fill ratio
-        b = int(20 + fill * 210)
-        g = int(190 - fill * 130)
-        r = int(230 - fill * 170)
-        color = (b, g, r)
-        label = f"[{int(fill * 100):2d}%] {', '.join(pr.missing_ppe)}"
-        thickness = 2
+        # Colore che vira verso rosso man mano che fill cresce
+        g = int(190 - fill * 150)
+        color = (20, g, 230)
+        label = f"[{int(fill*100)}%] {', '.join(pr.missing_ppe)}"
+        thick = 2
 
-    cv.rectangle(img, (x1, y1), (x2, y2), color, thickness)
-    cv.putText(img, label, (x1, max(y1 - 8, 14)), cv.FONT_HERSHEY_SIMPLEX, 0.52, color, 2, cv.LINE_AA)
+    cv.rectangle(img, (x1, y1), (x2, y2), color, thick)
+    cv.putText(img, label, (x1, max(y1 - 8, 14)),
+               cv.FONT_HERSHEY_SIMPLEX, 0.52, color, 2, cv.LINE_AA)
 
-    # ── PPE checklist (bottom-left of box) ───────────────────────────────────
     cy = y1 + 18
     for cat, req in PersonPPEChecker.FULL_PPE.items():
         found = pr.found_ppe.get(cat, 0)
-        ok = found >= req
-        mark = chr(0x2714) if ok else chr(0x2718)  # ✔ / ✘
-        c = _C_GREEN if ok else _C_RED
-        cv.putText(img, f"{mark} {cat}({found}/{req})", (x1 + 4, cy), cv.FONT_HERSHEY_SIMPLEX, 0.38, c, 1, cv.LINE_AA)
+        ok    = found >= req
+        c     = _C["green"] if ok else _C["red"]
+        mark  = chr(0x2714) if ok else chr(0x2718)
+        cv.putText(img, f"{mark} {cat} {found}/{req}",
+                   (x1 + 4, cy), cv.FONT_HERSHEY_SIMPLEX, 0.38, c, 1, cv.LINE_AA)
         cy += 15
 
 
-def _draw_hud(
-    img: np.ndarray,
-    frame_idx: int,
-    fps: float,
-    yolo_ms: float,
-    n_persons: int,
-    n_pending: int,
-    n_alerts: int,
-    vlm_calls: int,
-) -> None:
-    """Semi-transparent HUD in the top-left corner."""
-    overlay = img.copy()
-    cv.rectangle(overlay, (0, 0), (330, 130), (20, 20, 20), -1)
-    cv.addWeighted(overlay, 0.55, img, 0.45, 0, img)
-
-    lines = [
-        f"Frame {frame_idx:>6}   FPS {fps:>5.1f}",
-        f"YOLO    {yolo_ms:>6.1f} ms",
-        f"Persons {n_persons:>3}   Pending {n_pending:>3}",
-        f"Alerts  {n_alerts:>3}   VLM calls {vlm_calls:>4}",
-    ]
-    for i, line in enumerate(lines):
-        cv.putText(img, line, (8, 22 + i * 26), cv.FONT_HERSHEY_SIMPLEX, 0.52, _C_WHITE, 1, cv.LINE_AA)
+def _draw_hud(img: np.ndarray, frame_idx: int, fps: float,
+              yolo_ms: float, n_persons: int, n_pending: int,
+              n_alerts: int, vlm_calls: int) -> None:
+    ov = img.copy()
+    cv.rectangle(ov, (0, 0), (340, 135), _C["dark"], -1)
+    cv.addWeighted(ov, 0.55, img, 0.45, 0, img)
+    for i, line in enumerate([
+        f"Frame {frame_idx:>6}    FPS {fps:>5.1f}",
+        f"YOLO  {yolo_ms:>7.1f} ms",
+        f"Persone {n_persons:>3}   In attesa {n_pending:>3}",
+        f"Alert   {n_alerts:>3}   VLM calls {vlm_calls:>4}",
+    ]):
+        cv.putText(img, line, (8, 22 + i * 27),
+                   cv.FONT_HERSHEY_SIMPLEX, 0.52, _C["white"], 1, cv.LINE_AA)
 
 
-# ── Main tracker ──────────────────────────────────────────────────────────────
+# ── VideoSafetyTracker ────────────────────────────────────────────────────────
+
 class VideoSafetyTracker:
     """
-    Full real-time video safety tracking pipeline.
+    Pipeline completa di tracking video per la sicurezza PPE.
 
     Parameters
     ----------
-    yolo_analyzer       Pre-configured YOLOAnalyzer.
-    vlm_validator       Optional local VLM (Florence2Analyzer / MoondreamAnalyzer).
-    ppe_checker         PersonPPEChecker — defaults to full PPE set.
-    persistence_frames  Positive frames needed inside the window to trigger.
-    window_frames       Sliding-window width (≥ persistence_frames).
-    skip_frames         Run YOLO every N frames (1 = every frame).
-    display             Show live OpenCV window.
-    save_output         Path for annotated output video.
-    alert_log_path      Path for JSON alert log.
-    max_alerts          Stop after N confirmed alerts (0 = unlimited).
+    yolo_analyzer       YOLOAnalyzer configurato.
+    vlm_validator       MoondreamAnalyzer opzionale per validazione crop.
+    ppe_checker         PersonPPEChecker (default: set PPE completo).
+    persistence_frames  Frame positivi necessari nella window per confermare.
+    window_frames       Larghezza sliding window (≥ persistence_frames).
+    skip_frames         Esegui YOLO ogni N frame (1 = ogni frame).
+    display             Mostra finestra OpenCV live.
+    save_output         Percorso per il video annotato in output.
+    alert_log_path      Percorso per il log JSON degli alert.
+    max_alerts          Fermati dopo N alert confermati (0 = illimitato).
+    verbose             Stampa debug su stdout ogni frame.
     """
 
     def __init__(
         self,
-        yolo_analyzer: YOLOAnalyzer,
-        vlm_validator: BaseAnalyzer | None = None,
-        ppe_checker: PersonPPEChecker | None = None,
-        persistence_frames: int = 5,
-        window_frames: int = 8,
-        skip_frames: int = 1,
-        display: bool = True,
-        save_output: str | Path | None = None,
-        alert_log_path: str | Path | None = None,
-        max_alerts: int = 0,
+        yolo_analyzer:      YOLOAnalyzer,
+        vlm_validator:      BaseAnalyzer | None = None,
+        ppe_checker:        PersonPPEChecker | None = None,
+        persistence_frames: int  = 4,
+        window_frames:      int  = 7,
+        skip_frames:        int  = 1,
+        display:            bool = True,
+        save_output:        str | Path | None = None,
+        alert_log_path:     str | Path | None = None,
+        max_alerts:         int  = 0,
+        verbose:            bool = False,
     ):
-        self.yolo = yolo_analyzer
-        self.vlm = vlm_validator
+        self.yolo    = yolo_analyzer
+        self.vlm     = vlm_validator
         self.checker = ppe_checker or PersonPPEChecker()
-
-        window = max(window_frames, persistence_frames)
         self._vio_tracker = VideoViolationTracker(
             threshold_frames=persistence_frames,
-            window=window,
+            window=max(window_frames, persistence_frames),
         )
-
-        self.skip_frames = max(1, skip_frames)
-        self.display = display
-        self.save_output = Path(save_output) if save_output else None
+        self.skip_frames    = max(1, skip_frames)
+        self.display        = display
+        self.save_output    = Path(save_output) if save_output else None
         self.alert_log_path = Path(alert_log_path) if alert_log_path else None
-        self.max_alerts = max_alerts
+        self.max_alerts     = max_alerts
+        self.verbose        = verbose
 
         self._vlm_calls = 0
         self._alerts: list[FrameAlert] = []
 
-    # ── Public entry point ────────────────────────────────────────────────────
+    # ── Entry point ────────────────────────────────────────────────────────────
 
     def run(self, source: str | int = 0) -> list[FrameAlert]:
-        """Run on a video file, RTSP stream, or webcam index."""
         cap = cv.VideoCapture(source)
         if not cap.isOpened():
-            msg = f"Cannot open video source: {source!r}"
-            raise RuntimeError(msg)
+            raise RuntimeError(f"Impossibile aprire la sorgente video: {source!r}")
 
         fps_src = cap.get(cv.CAP_PROP_FPS) or 25.0
-        frame_w = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
-        frame_h = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
+        fw = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
+        fh = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
 
         writer = None
         if self.save_output:
             self.save_output.parent.mkdir(parents=True, exist_ok=True)
-            fourcc = cv.VideoWriter_fourcc(*"mp4v")
-            writer = cv.VideoWriter(str(self.save_output), fourcc, fps_src, (frame_w, frame_h))
+            writer = cv.VideoWriter(
+                str(self.save_output),
+                cv.VideoWriter_fourcc(*"mp4v"),
+                fps_src, (fw, fh),
+            )
 
-        frame_idx = 0
-        last_person_results: list[PersonPPEResult] = []
-        last_yolo_ms = 0.0
-        fps_counter = deque(maxlen=30)
-        t_last = time.perf_counter()
+        frame_idx  = 0
+        last_ppr:  list[PersonPPEResult] = []
+        last_ms    = 0.0
+        fps_buf    = deque(maxlen=30)
+        t_last     = time.perf_counter()
 
         try:
             while True:
@@ -348,65 +323,55 @@ class VideoSafetyTracker:
 
                 frame_idx += 1
                 t_now = time.perf_counter()
-                fps_counter.append(1.0 / max(t_now - t_last, 1e-6))
-                t_last = t_now
-                live_fps = sum(fps_counter) / len(fps_counter)
+                fps_buf.append(1.0 / max(t_now - t_last, 1e-6))
+                t_last   = t_now
+                live_fps = sum(fps_buf) / len(fps_buf)
 
-                # ── Step 1: YOLO + PPE check (every skip_frames) ─────────────
+                # ── YOLO + PPE check ─────────────────────────────────────────
                 if (frame_idx - 1) % self.skip_frames == 0:
-                    tmp_path = "/tmp/_tracker_frame.jpg"
-                    cv.imwrite(tmp_path, frame)
-                    yolo_result = self.yolo.analyze(tmp_path)
-                    last_yolo_ms = yolo_result.inference_time_ms
-                    last_person_results = self.checker.check(yolo_result.detections)
+                    yolo_res = self.yolo.analyze(frame)   # ndarray diretto, niente disco
+                    last_ms  = yolo_res.inference_time_ms
 
-                # ── Step 2: Persistence filtering ────────────────────────────
-                confirmed = self._vio_tracker.update(last_person_results, frame_w, frame_h)
+                    if yolo_res.error:
+                        if self.verbose:
+                            print(f"[frame {frame_idx}] YOLO error: {yolo_res.error}")
+                    else:
+                        # Passa le dimensioni reali del frame per denormalizzare bbox
+                        last_ppr = self.checker.check(yolo_res.detections, fw, fh)
 
-                # ── Step 3: VLM validation & alert creation ───────────────────
+                        if self.verbose:
+                            print(f"\n[frame {frame_idx}] {len(yolo_res.detections)} det → "
+                                  f"{len(last_ppr)} persone")
+                            for pr in last_ppr:
+                                print(f"  {pr.summary()}")
+
+                # ── Persistence filtering ────────────────────────────────────
+                confirmed = self._vio_tracker.update(last_ppr, fw, fh)
+
+                # ── VLM validation + alert ───────────────────────────────────
                 if confirmed:
-                    alert = self._validate_and_alert(
-                        frame,
-                        frame_idx,
-                        cap.get(cv.CAP_PROP_POS_MSEC) / 1000.0,
-                        last_person_results,
-                        confirmed,
-                    )
+                    alert = self._make_alert(frame, frame_idx,
+                                             cap.get(cv.CAP_PROP_POS_MSEC)/1000.0,
+                                             last_ppr, confirmed)
                     self._alerts.append(alert)
                     print(alert.summary())
                     if self.max_alerts and len(self._alerts) >= self.max_alerts:
                         break
 
-                # ── Step 4: Annotate frame ────────────────────────────────────
-                # Build a set of person indices that are confirmed (stable key)
+                # ── Annotazione ──────────────────────────────────────────────
                 confirmed_idxs = {pr.person_idx for pr in confirmed}
+                for pr in last_ppr:
+                    fill = self._vio_tracker.fill(pr, fw, fh)
+                    _draw_person(frame, pr, pr.person_idx in confirmed_idxs, fill)
 
-                for pr in last_person_results:
-                    fill = self._vio_tracker.person_state(pr, frame_w, frame_h)
-                    _draw_person(
-                        frame,
-                        pr,
-                        confirmed=pr.person_idx in confirmed_idxs,
-                        fill=fill,
-                    )
-
-                n_pending = sum(
-                    1 for pr in last_person_results if not pr.is_compliant and pr.person_idx not in confirmed_idxs
-                )
-                _draw_hud(
-                    frame,
-                    frame_idx,
-                    live_fps,
-                    last_yolo_ms,
-                    n_persons=len(last_person_results),
-                    n_pending=n_pending,
-                    n_alerts=len(self._alerts),
-                    vlm_calls=self._vlm_calls,
-                )
+                n_pending = sum(1 for pr in last_ppr
+                                if not pr.is_compliant
+                                and pr.person_idx not in confirmed_idxs)
+                _draw_hud(frame, frame_idx, live_fps, last_ms,
+                          len(last_ppr), n_pending, len(self._alerts), self._vlm_calls)
 
                 if writer:
                     writer.write(frame)
-
                 if self.display:
                     cv.imshow("PPE Safety Tracker", frame)
                     if cv.waitKey(1) & 0xFF in (ord("q"), 27):
@@ -419,90 +384,60 @@ class VideoSafetyTracker:
             if self.display:
                 cv.destroyAllWindows()
             if self.alert_log_path:
-                self._save_alert_log()
+                self._save_log()
 
         return self._alerts
 
-    # ── VLM validation ────────────────────────────────────────────────────────
+    # ── VLM ───────────────────────────────────────────────────────────────────
 
-    def _validate_and_alert(
-        self,
-        frame: np.ndarray,
-        frame_idx: int,
-        timestamp_s: float,
-        all_person_results: list[PersonPPEResult],
-        confirmed: list[PersonPPEResult],
-    ) -> FrameAlert:
-        alert = FrameAlert(
-            frame_idx=frame_idx,
-            timestamp_s=timestamp_s,
-            person_results=all_person_results,
-        )
-
+    def _make_alert(self, frame, frame_idx, ts, all_ppr, confirmed) -> FrameAlert:
+        alert = FrameAlert(frame_idx=frame_idx, timestamp_s=ts,
+                           person_results=all_ppr)
         if self.vlm is None:
-            alert.vlm_confirmed = True  # trust YOLO + tracker alone
+            alert.vlm_confirmed = True
             return alert
 
-        confirmed_by_vlm = False
-        vlm_labels_all: list[str] = []
-
+        any_confirmed = False
+        vlm_resp_parts: list[str] = []
         for pr in confirmed:
-            if not pr.needs_vlm_validation:
-                confirmed_by_vlm = True
+            crop = self._crop(frame, pr)
+            if crop is None:
+                any_confirmed = True
                 continue
-
-            crop = self._crop_person(frame, pr)
-            tmp = "/tmp/_vlm_crop.jpg"
-            cv.imwrite(tmp, crop)
-
-            vlm_res = self.vlm.analyze(tmp)
+            # crop è un np.ndarray BGR — niente disco, passato direttamente
+            ok, resp = _moondream_validate(self.vlm, crop, pr.missing_ppe)
             self._vlm_calls += 1
+            if ok:
+                any_confirmed = True
+            vlm_resp_parts.append(f"Person#{pr.person_idx}: {resp}")
 
-            if vlm_res.error:
-                # VLM failed → conservatively confirm the YOLO alert
-                confirmed_by_vlm = True
-            else:
-                viol_labels = [d.label for d in vlm_res.detections if d.is_violation]
-                vlm_labels_all.extend(viol_labels)
-                if viol_labels:
-                    confirmed_by_vlm = True
-
-        alert.vlm_confirmed = confirmed_by_vlm
-        if vlm_labels_all:
-            alert.vlm_response = str(vlm_labels_all)
+        alert.vlm_confirmed = any_confirmed
+        alert.vlm_response  = " | ".join(vlm_resp_parts) or None
         return alert
 
     @staticmethod
-    def _crop_person(frame: np.ndarray, pr: PersonPPEResult) -> np.ndarray:
+    def _crop(frame: np.ndarray, pr: PersonPPEResult):
         if pr.person_bbox is None:
-            return frame
+            return None
         h, w = frame.shape[:2]
-        x1 = max(0, int(pr.person_bbox[0]))
-        y1 = max(0, int(pr.person_bbox[1]))
-        x2 = min(w, int(pr.person_bbox[2]))
-        y2 = min(h, int(pr.person_bbox[3]))
+        x1 = max(0, int(pr.person_bbox[0]));  y1 = max(0, int(pr.person_bbox[1]))
+        x2 = min(w, int(pr.person_bbox[2]));  y2 = min(h, int(pr.person_bbox[3]))
         if x2 <= x1 or y2 <= y1:
-            return frame
+            return None
         return frame[y1:y2, x1:x2]
 
-    # ── Alert log ─────────────────────────────────────────────────────────────
+    # ── Log ───────────────────────────────────────────────────────────────────
 
-    def _save_alert_log(self) -> None:
+    def _save_log(self):
         import json
-
         data = [
             {
-                "frame": a.frame_idx,
-                "timestamp_s": round(a.timestamp_s, 2),
-                "vlm_confirmed": a.vlm_confirmed,
-                "vlm_response": a.vlm_response,
+                "frame": a.frame_idx, "timestamp_s": round(a.timestamp_s, 2),
+                "vlm_confirmed": a.vlm_confirmed, "vlm_response": a.vlm_response,
                 "violations": [
-                    {
-                        "person_idx": p.person_idx,
-                        "missing_ppe": p.missing_ppe,
-                        "found_ppe": p.found_ppe,
-                        "bbox": list(p.person_bbox) if p.person_bbox else None,
-                    }
+                    {"person_idx": p.person_idx, "missing_ppe": p.missing_ppe,
+                     "found_ppe": p.found_ppe,
+                     "bbox": list(p.person_bbox) if p.person_bbox else None}
                     for p in a.violations
                 ],
             }
@@ -510,51 +445,49 @@ class VideoSafetyTracker:
         ]
         self.alert_log_path.parent.mkdir(parents=True, exist_ok=True)
         self.alert_log_path.write_text(json.dumps(data, indent=2))
-        print(f"Alert log → {self.alert_log_path}  ({len(data)} alerts)")
+        print(f"Log alert → {self.alert_log_path} ({len(data)} alert)")
 
 
-# ── Convenience factory ───────────────────────────────────────────────────────
+# ── Factory ───────────────────────────────────────────────────────────────────
+
 def build_hybrid_tracker(
-    yolo_model_path: str,
-    vlm_backend: str = "none",  # "florence2" | "moondream" | "none"
-    vlm_device: str = "cpu",
-    persistence_frames: int = 5,
-    window_frames: int = 8,
-    skip_frames: int = 1,
-    display: bool = True,
-    save_output: str | None = None,
-    alert_log: str | None = None,
-    yolo_conf: float = 0.35,
+    yolo_model_path:    str,
+    vlm_backend:        str   = "none",      # "moondream" | "none"
+    vlm_device:         str   = "cpu",
+    persistence_frames: int   = 4,
+    window_frames:      int   = 7,
+    skip_frames:        int   = 1,
+    display:            bool  = True,
+    save_output:        str | None = None,
+    alert_log:          str | None = None,
+    yolo_conf:          float = 0.30,
+    verbose:            bool  = False,
 ) -> VideoSafetyTracker:
     """
-    Quick-start factory.
+    Factory rapida.
 
-    Example::
+    Esempio::
 
         tracker = build_hybrid_tracker(
             yolo_model_path="weights/best.onnx",
-            vlm_backend="florence2",
             save_output="output/annotated.mp4",
             alert_log="output/alerts.json",
+            verbose=True,    # stampa detection ogni frame
         )
-        tracker.run("site_video.mp4")
+        tracker.run("test.mp4")
     """
     from .analyzer import YOLOAnalyzer
-
     yolo = YOLOAnalyzer(model_path=yolo_model_path, conf_threshold=yolo_conf)
 
     vlm: BaseAnalyzer | None = None
-    if vlm_backend == "florence2":
-        from .analyzer import Florence2Analyzer
-
-        vlm = Florence2Analyzer(device=vlm_device)
-    elif vlm_backend == "moondream":
+    if vlm_backend == "moondream":
         from .analyzer import MoondreamAnalyzer
-
         vlm = MoondreamAnalyzer(device=vlm_device)
-    elif vlm_backend != "none":
-        msg = f"Unknown vlm_backend {vlm_backend!r}. Choose 'florence2', 'moondream', or 'none'."
-        raise ValueError(msg)
+    elif vlm_backend not in ("none", ""):
+        raise ValueError(
+            f"vlm_backend={vlm_backend!r} non riconosciuto. "
+            "Usa 'moondream' o 'none'."
+        )
 
     return VideoSafetyTracker(
         yolo_analyzer=yolo,
@@ -565,4 +498,5 @@ def build_hybrid_tracker(
         display=display,
         save_output=save_output,
         alert_log_path=alert_log,
+        verbose=verbose,
     )

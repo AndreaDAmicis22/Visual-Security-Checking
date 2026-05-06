@@ -1,16 +1,14 @@
 """
 Person-centric PPE Completeness Checker.
 
-For every 'Person' detected by YOLO, checks whether required PPE items
-(Helmet, Vest, Glove ×2, Shoe ×2) are spatially associated via containment
-overlap with that person's bounding box.
+Per ogni 'Person' rilevata da YOLO, verifica che i PPE richiesti
+(Helmet, Vest, Glove ×2, Shoe ×2) siano spazialmente associati
+tramite containment overlap con la bounding box della persona.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-
-# ── Required PPE ──────────────────────────────────────────────────────────────
 
 REQUIRED_PPE_COUNTS: dict[str, int] = {
     "Helmet": 1,
@@ -19,7 +17,6 @@ REQUIRED_PPE_COUNTS: dict[str, int] = {
     "Shoe": 2,
 }
 
-# All lowercase label strings → canonical PPE category
 _PPE_LABEL_MAP: dict[str, str] = {
     "helmet": "Helmet",
     "hardhat": "Helmet",
@@ -40,54 +37,81 @@ _PPE_LABEL_MAP: dict[str, str] = {
 }
 
 
-# ── Bbox helpers ──────────────────────────────────────────────────────────────
-def _to_xyxy(bbox) -> tuple[float, float, float, float] | None:
+def _to_xyxy(bbox, frame_w: int = 640, frame_h: int = 640) -> tuple[float, float, float, float] | None:
     """
-    Normalise any bbox format to (x1, y1, x2, y2).
+    Normalizza qualsiasi formato bbox a (x1, y1, x2, y2) in pixel assoluti.
 
-    Accepted formats:
-      [x1, y1, x2, y2]               flat 4-element list/tuple
-      [[x1,y1], [x2,y2], ...]        list of (x,y) points (polygon)
-    Returns None if the input cannot be parsed or is degenerate.
+    Formati supportati:
+      [x1, y1, x2, y2]  pixel assoluti         → passthrough
+      [x1, y1, x2, y2]  normalizzati (0-1)     → moltiplica per w,h
+      [cx, cy, w, h]    pixel assoluti (center) → converti
+      [cx, cy, w, h]    normalizzati (0-1)      → converti + scala
+      [[x1,y1],[x2,y2],...]  polygon            → axis-aligned bbox
     """
     if bbox is None:
         return None
     try:
-        # Detect whether elements are scalars or 2-element sequences
         first = bbox[0]
         if isinstance(first, (list, tuple)):
-            # Polygon / point list → axis-aligned bbox
+            # Polygon: lista di punti
             xs = [float(p[0]) for p in bbox]
             ys = [float(p[1]) for p in bbox]
             return (min(xs), min(ys), max(xs), max(ys))
-        # Flat numeric list [x1, y1, x2, y2]
+
         coords = [float(v) for v in bbox]
+
         if len(coords) == 4:
-            return (coords[0], coords[1], coords[2], coords[3])
+            a, b, c, d = coords
+
+            # Rilevazione automatica del formato
+            # Se tutti i valori sono in [0,1] → normalizzati
+            if all(0.0 <= v <= 1.0 for v in coords):
+                # Potrebbe essere [x1,y1,x2,y2] norm o [cx,cy,w,h] norm
+                # Euristica: se c < a o d < b → center format
+                if c < a or d < b:
+                    # [cx, cy, w, h] normalizzato
+                    x1 = (a - c / 2) * frame_w
+                    y1 = (b - d / 2) * frame_h
+                    x2 = (a + c / 2) * frame_w
+                    y2 = (b + d / 2) * frame_h
+                else:
+                    # [x1, y1, x2, y2] normalizzato
+                    x1, y1, x2, y2 = a * frame_w, b * frame_h, c * frame_w, d * frame_h
+                return (x1, y1, x2, y2)
+
+            # Valori pixel: potrebbe essere xyxy o cxcywh
+            # Se c < a o d < b sicuramente è center format
+            if c < a or d < b:
+                # [cx, cy, w, h] pixel
+                x1, y1 = a - c / 2, b - d / 2
+                x2, y2 = a + c / 2, b + d / 2
+            else:
+                # [x1, y1, x2, y2] pixel — formato più comune
+                x1, y1, x2, y2 = a, b, c, d
+
+            return (x1, y1, x2, y2)
+
         if len(coords) >= 8:
-            xs = coords[0::2]
-            ys = coords[1::2]
+            xs, ys = coords[0::2], coords[1::2]
             return (min(xs), min(ys), max(xs), max(ys))
-    except (TypeError, ValueError, IndexError, KeyError):
+
+    except (TypeError, ValueError, IndexError):
         pass
     return None
 
 
 def _containment(inner: tuple, outer: tuple) -> float:
-    """Fraction of *inner* box area covered by *outer* (0.0–1.0)."""
+    """Frazione di *inner* coperta da *outer* (0–1)."""
     ix1 = max(inner[0], outer[0])
     iy1 = max(inner[1], outer[1])
     ix2 = min(inner[2], outer[2])
     iy2 = min(inner[3], outer[3])
-    inter_w = max(0.0, ix2 - ix1)
-    inter_h = max(0.0, iy2 - iy1)
-    inter = inter_w * inter_h
-    area_inner = max(0.0, inner[2] - inner[0]) * max(0.0, inner[3] - inner[1])
-    return inter / area_inner if area_inner > 0 else 0.0
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    area = max(0.0, inner[2] - inner[0]) * max(0.0, inner[3] - inner[1])
+    return inter / area if area > 0 else 0.0
 
 
 def _iou(a: tuple, b: tuple) -> float:
-    """Standard IoU for (x1,y1,x2,y2) boxes."""
     ix1 = max(a[0], b[0])
     iy1 = max(a[1], b[1])
     ix2 = min(a[2], b[2])
@@ -101,12 +125,21 @@ def _iou(a: tuple, b: tuple) -> float:
     return inter / union if union > 0 else 0.0
 
 
-# ── Result dataclass ──────────────────────────────────────────────────────────
+def _overlap_ratio(ppe_box: tuple, person_box: tuple) -> float:
+    """
+    Score composito: max tra containment e IoU.
+    Containment è il metodo principale (PPE è piccolo, Person è grande).
+    IoU come fallback per elementi grande-scala (es. Vest ≈ torso).
+    """
+    return max(_containment(ppe_box, person_box), _iou(ppe_box, person_box))
+
+
 @dataclass
 class PersonPPEResult:
     person_idx: int
-    person_bbox: tuple | None  # (x1,y1,x2,y2) in pixel coords
+    person_bbox: tuple | None
     person_conf: float
+    frame_size: tuple = (640, 640)  # (w, h) usato per normalizzare bbox
     found_ppe: dict[str, int] = field(default_factory=dict)
     missing_ppe: list[str] = field(default_factory=list)
     associated_ppe: list = field(default_factory=list)
@@ -117,33 +150,29 @@ class PersonPPEResult:
         return len(self.missing_ppe) == 0
 
     def summary(self) -> str:
-        status = "✅ OK" if self.is_compliant else f"⚠️  MISSING: {self.missing_ppe}"
-        return f"Person#{self.person_idx}(conf={self.person_conf:.2f}) found={self.found_ppe} | {status}" + (
+        status = "✅ OK" if self.is_compliant else f"⚠️  MANCANTI: {self.missing_ppe}"
+        return f"Persona#{self.person_idx}(conf={self.person_conf:.2f}) trovati={self.found_ppe} | {status}" + (
             " [VLM→]" if self.needs_vlm_validation else ""
         )
 
 
-# ── Checker ───────────────────────────────────────────────────────────────────
 class PersonPPEChecker:
     """
-    Associates YOLO detections to individual persons and evaluates PPE
-    completeness via spatial containment.
+    Associa le detection YOLO alle persone e valuta la completezza dei PPE.
 
     Parameters
     ----------
-    required_ppe:
-        {category: min_count}.  Default = full PPE set.
-    containment_threshold:
-        Minimum fraction of a PPE item bbox that must lie *inside* the
-        person bbox to count as associated.  Default 0.30 (relaxed to handle
-        items at the edge of the person box, e.g. shoes near the bottom).
-    iou_threshold:
-        Secondary criterion used when both boxes are similarly sized.
-        Default 0.05.
-    no_bbox_policy:
-        What to do when a person has no bbox ("none_missing" | "vlm_only").
-        "none_missing" → treat as fully equipped (conservative).
-        "vlm_only"     → mark as needing VLM with no PPE confirmed.
+    required_ppe : dict[str, int]
+        Quantità minima per ogni PPE. Default = set completo.
+    containment_threshold : float
+        Soglia minima di overlap per associare un PPE a una persona. Default 0.25.
+        Abbassata rispetto alla versione precedente per essere meno restrittiva
+        con soggetti parzialmente inquadrati.
+    iou_threshold : float
+        Soglia IoU fallback. Default 0.05.
+    no_bbox_policy : str
+        "vlm_only"    → persona senza bbox: tutti i PPE mancanti, VLM obbligatorio
+        "none_missing" → persona senza bbox: considerata compliant (conservativo)
     """
 
     FULL_PPE = REQUIRED_PPE_COUNTS
@@ -151,7 +180,7 @@ class PersonPPEChecker:
     def __init__(
         self,
         required_ppe: dict[str, int] | None = None,
-        containment_threshold: float = 0.30,
+        containment_threshold: float = 0.25,
         iou_threshold: float = 0.05,
         no_bbox_policy: str = "vlm_only",
         vlm_trigger_missing: set[str] | None = None,
@@ -160,13 +189,12 @@ class PersonPPEChecker:
         self.containment_threshold = containment_threshold
         self.iou_threshold = iou_threshold
         self.no_bbox_policy = no_bbox_policy
-        self.vlm_trigger_missing = vlm_trigger_missing  # None → trigger on any missing
+        self.vlm_trigger_missing = vlm_trigger_missing
 
-    def check(self, detections: list) -> list[PersonPPEResult]:
+    def check(self, detections: list, frame_w: int = 640, frame_h: int = 640) -> list[PersonPPEResult]:
         """
-        Returns one PersonPPEResult per Person detection in `detections`.
-        PPE items are greedily assigned to the *nearest* (highest-containment)
-        person — each item can satisfy only one person.
+        Ritorna un PersonPPEResult per ogni Person rilevata.
+        frame_w/frame_h servono per denormalizzare bbox se necessario.
         """
         persons = [(i, d) for i, d in enumerate(detections) if d.label.lower() == "person"]
         ppe_items = [
@@ -175,72 +203,63 @@ class PersonPPEChecker:
             if d.label.lower().strip() in _PPE_LABEL_MAP
         ]
 
-        # Pre-compute boxes
-        person_boxes = {i: _to_xyxy(d.bbox) for i, d in persons}
+        if not persons:
+            return []
 
-        # ── Greedy assignment: assign each PPE item to best-matching person ──
-        # score[p_idx][item_idx] = containment score
+        # Pre-calcola le bbox di tutte le persone
+        person_boxes = {i: _to_xyxy(d.bbox, frame_w, frame_h) for i, d in persons}
+
+        # ── Greedy assignment: ogni PPE va alla persona con overlap maggiore ──
+        # Evita che uno stesso item venga contato per più persone
         assignments: dict[int, list[tuple[str, object]]] = {i: [] for i, _ in persons}
 
-        for _item_i, item_det, ppe_cat in ppe_items:
-            item_box = _to_xyxy(item_det.bbox)
+        for _, item_det, ppe_cat in ppe_items:
+            item_box = _to_xyxy(item_det.bbox, frame_w, frame_h)
             if item_box is None:
                 continue
 
             best_score = -1.0
             best_pidx = None
-
             for p_i, _ in persons:
                 p_box = person_boxes.get(p_i)
                 if p_box is None:
                     continue
-                score = _containment(item_box, p_box)
-                if score < self.containment_threshold:
-                    # fallback: try IoU for same-scale objects (e.g. vest ≈ torso)
-                    score = _iou(item_box, p_box)
-                    if score < self.iou_threshold:
-                        continue
-                if score > best_score:
+                score = _overlap_ratio(item_box, p_box)
+                if score >= self.containment_threshold and score > best_score:
                     best_score = score
                     best_pidx = p_i
 
             if best_pidx is not None:
                 assignments[best_pidx].append((ppe_cat, item_det))
 
-        # ── Build results ────────────────────────────────────────────────────
+        # ── Costruisci i risultati ─────────────────────────────────────────────
         results: list[PersonPPEResult] = []
-
         for p_i, p_det in persons:
             p_box = person_boxes[p_i]
 
-            # Count per-category
             found_counts: dict[str, int] = dict.fromkeys(self.required_ppe, 0)
             assoc_dets = []
             for ppe_cat, det in assignments[p_i]:
                 found_counts[ppe_cat] = found_counts.get(ppe_cat, 0) + 1
                 assoc_dets.append(det)
 
-            # Handle no-bbox persons
             if p_box is None:
                 if self.no_bbox_policy == "vlm_only":
-                    # We cannot spatially verify → send to VLM, assume all missing
-                    missing = list(self.required_ppe.keys())
-                    needs_vlm = True
+                    missing, needs_vlm = list(self.required_ppe.keys()), True
                 else:
-                    missing = []
-                    needs_vlm = False
+                    missing, needs_vlm = [], False
             else:
-                missing = [cat for cat, req_n in self.required_ppe.items() if found_counts.get(cat, 0) < req_n]
-                if missing:
-                    needs_vlm = True if self.vlm_trigger_missing is None else bool(set(missing) & self.vlm_trigger_missing)
-                else:
-                    needs_vlm = False
+                missing = [cat for cat, req in self.required_ppe.items() if found_counts.get(cat, 0) < req]
+                needs_vlm = (
+                    bool(missing) if self.vlm_trigger_missing is None else bool(set(missing) & self.vlm_trigger_missing)
+                )
 
             results.append(
                 PersonPPEResult(
                     person_idx=p_i,
                     person_bbox=p_box,
                     person_conf=p_det.confidence,
+                    frame_size=(frame_w, frame_h),
                     found_ppe=found_counts,
                     missing_ppe=missing,
                     associated_ppe=assoc_dets,
