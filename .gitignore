@@ -177,6 +177,7 @@ data/
 temp/
 cache/
 logs/
+output/
 
 # ==============================
 # File immagine

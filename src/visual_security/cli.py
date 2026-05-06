@@ -44,6 +44,7 @@ load_dotenv()
 
 def _build_analyzers(model_arg: str, yolo_model: str | None = None):
     from src.visual_security.analyzer import (
+        AzureAIVisionAnalyzer,
         FoundryGPT4oAnalyzer,
         YOLOAnalyzer,
     )
@@ -63,6 +64,14 @@ def _build_analyzers(model_arg: str, yolo_model: str | None = None):
             analyzers.append(FoundryGPT4oAnalyzer(api_key=key, endpoint=url))
         else:
             print("[WARN] AZURE_OPENAI_KEY not set, skipping Foundry GPT-4o")
+
+    if model_arg in ("vision", "all"):
+        key = os.getenv("AZURE_VISION_KEY")
+        endpoint = os.getenv("AZURE_VISION_ENDPOINT")
+        if key:
+            analyzers.append(AzureAIVisionAnalyzer(api_key=key, endpoint=endpoint))
+        else:
+            print("[WARN] AZURE_VISION_KEY not set, skipping Azure AI Vision")
 
     return analyzers
 
@@ -118,8 +127,9 @@ def cmd_track(args):
     Example:
         python -m src.visual_security.cli track \\
             --yolo-model weights/best.onnx \\
-            --source rtsp://camera1 \\
-            --vlm florence2 \\
+            --source site_video.mp4 \\
+            --vlm none \\
+            --persistence 5 --window 8 \\
             --save-output output/annotated.mp4 \\
             --alert-log output/alerts.json
     """
@@ -130,6 +140,7 @@ def cmd_track(args):
         vlm_backend=args.vlm,
         vlm_device=args.device,
         persistence_frames=args.persistence,
+        window_frames=args.window,
         skip_frames=args.skip_frames,
         display=not args.no_display,
         save_output=args.save_output,
@@ -140,9 +151,9 @@ def cmd_track(args):
     source = int(args.source) if args.source.isdigit() else args.source
     alerts = tracker.run(source)
 
-    print(f"\n{'=' * 60}")
-    print(f"Tracking complete — {len(alerts)} confirmed alert(s) detected.")
-    print(f"{'=' * 60}")
+    print(f"\n{'='*60}")
+    print(f"Tracking complete — {len(alerts)} confirmed alert(s).")
+    print(f"{'='*60}")
     for a in alerts:
         print(a.summary())
 
@@ -257,29 +268,54 @@ def main():
 
     # track
     p = sub.add_parser("track", help="Real-time video safety tracking (hybrid pipeline)")
-    p.add_argument("--yolo-model", required=True, help="Path to YOLO ONNX weights")
-    p.add_argument("--source", default="0", help="Video source: file path, RTSP URL, or webcam index (default: 0)")
-    p.add_argument(
-        "--vlm",
-        default="none",
-        choices=["florence2", "moondream", "none"],
-        help="Local VLM validator for confirmed violations (default: none)",
-    )
-    p.add_argument("--device", default="cpu", help="Torch device for VLM (cpu/cuda/mps)")
-    p.add_argument("--persistence", type=int, default=8, help="Consecutive frames before triggering alert (default: 8)")
-    p.add_argument("--skip-frames", type=int, default=1, help="Run YOLO every N frames (1=every frame, 2=every other, …)")
-    p.add_argument("--conf", type=float, default=0.40, help="YOLO confidence threshold (default: 0.40)")
-    p.add_argument("--save-output", default=None, help="Path to save annotated video (e.g. output/annotated.mp4)")
-    p.add_argument("--alert-log", default=None, help="Path to save JSON alert log (e.g. output/alerts.json)")
-    p.add_argument("--no-display", action="store_true", help="Disable live OpenCV window (useful for headless servers)")
+    p.add_argument("--yolo-model",  required=True, help="Path to YOLO ONNX weights")
+    p.add_argument("--source",      default="0",
+                   help="Video source: file path, RTSP URL, or webcam index (default: 0)")
+    p.add_argument("--vlm",         default="none",
+                   choices=["florence2", "moondream", "none"],
+                   help="Local VLM validator for confirmed violations (default: none)")
+    p.add_argument("--device",      default="cpu",
+                   help="Torch device for VLM: cpu / cuda / mps")
+    p.add_argument("--persistence", type=int, default=5,
+                   help="Positive frames needed inside window to confirm alert (default: 5)")
+    p.add_argument("--window",      type=int, default=8,
+                   help="Sliding-window width in frames (default: 8)")
+    p.add_argument("--skip-frames", type=int, default=1,
+                   help="Run YOLO every N frames (1=every frame, 2=every other, …)")
+    p.add_argument("--conf",        type=float, default=0.35,
+                   help="YOLO confidence threshold (default: 0.35)")
+    p.add_argument("--save-output", default=None,
+                   help="Path to save annotated video (e.g. output/annotated.mp4)")
+    p.add_argument("--alert-log",   default=None,
+                   help="Path to save JSON alert log (e.g. output/alerts.json)")
+    p.add_argument("--no-display",  action="store_true",
+                   help="Disable live OpenCV window (headless servers)")
 
     # costs
     p = sub.add_parser("costs", help="Show cost estimates")
     p.add_argument("--images-per-day", type=int, default=500)
     p.add_argument("--working-days", type=int, default=22)
 
+    # debug
+    p = sub.add_parser("debug", help="Diagnose PPE detection on a single image frame")
+    p.add_argument("--image",       required=True)
+    p.add_argument("--yolo-model",  required=True)
+    p.add_argument("--conf",        type=float, default=0.35)
+    p.add_argument("--containment", type=float, default=0.30,
+                   help="PPE→Person containment threshold (default 0.30)")
+    p.add_argument("--iou",         type=float, default=0.05)
+
     args = parser.parse_args()
-    {"analyze": cmd_analyze, "evaluate": cmd_evaluate, "benchmark": cmd_benchmark, "costs": cmd_costs}[args.command](args)
+    {
+        "analyze":   cmd_analyze,
+        "evaluate":  cmd_evaluate,
+        "benchmark": cmd_benchmark,
+        "costs":     cmd_costs,
+        "track":     cmd_track,
+        "debug":     lambda a: __import__(
+            "src.visual_security.debug_frame", fromlist=["run"]
+        ).run(a.image, a.yolo_model, a.conf, a.containment, a.iou),
+    }[args.command](args)
 
 
 if __name__ == "__main__":
