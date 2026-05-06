@@ -20,9 +20,12 @@ import urllib.request
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import cv2 as cv
-import numpy as np
+
+if TYPE_CHECKING:
+    import numpy as np
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -99,13 +102,14 @@ class BaseAnalyzer(ABC):
     def __init__(self, model_name: str):
         self.model_name = model_name
 
-    def analyze(self, image_source: "str | Path | np.ndarray") -> AnalysisResult:
+    def analyze(self, image_source: str | Path | np.ndarray) -> AnalysisResult:
         """
         Accetta un percorso file (str/Path) oppure un frame già in memoria
         (np.ndarray BGR, come restituito da cv2.VideoCapture).
         Nessun file temporaneo viene scritto su disco.
         """
         import numpy as _np
+
         label = "<ndarray>" if isinstance(image_source, _np.ndarray) else str(image_source)
         start = time.perf_counter()
         try:
@@ -125,50 +129,56 @@ class BaseAnalyzer(ABC):
         )
 
     @abstractmethod
-    def _run_inference(self, image_source: "str | np.ndarray") -> list[Detection]: ...
+    def _run_inference(self, image_source: str | np.ndarray) -> list[Detection]: ...
 
     # ── Helpers per VLM che hanno bisogno di bytes/base64 ────────────────────
 
     @staticmethod
-    def _to_bgr(image_source: "str | Path | np.ndarray") -> "np.ndarray":
+    def _to_bgr(image_source: str | Path | np.ndarray) -> np.ndarray:
         """Restituisce sempre un array BGR, da path o da ndarray già in memoria."""
         import numpy as np
+
         if isinstance(image_source, np.ndarray):
             return image_source
         img = cv.imread(str(image_source))
         if img is None:
-            raise ValueError(f"Impossibile leggere l'immagine: {image_source}")
+            msg = f"Impossibile leggere l'immagine: {image_source}"
+            raise ValueError(msg)
         return img
 
     @staticmethod
-    def _to_pil(image_source: "str | Path | np.ndarray"):
+    def _to_pil(image_source: str | Path | np.ndarray):
         """Restituisce una PIL Image RGB, da path o da ndarray BGR."""
-        from PIL import Image
         import numpy as np
+        from PIL import Image
+
         if isinstance(image_source, np.ndarray):
             return Image.fromarray(cv.cvtColor(image_source, cv.COLOR_BGR2RGB))
         return Image.open(str(image_source)).convert("RGB")
 
     @staticmethod
-    def _to_base64(image_source: "str | Path | np.ndarray") -> tuple[str, str]:
+    def _to_base64(image_source: str | Path | np.ndarray) -> tuple[str, str]:
         """
         Ritorna (base64_string, media_type).
         Se ndarray: encode in-memory come JPEG (nessun file su disco).
         Se path: legge direttamente dal file.
         """
         import numpy as np
+
         if isinstance(image_source, np.ndarray):
             ok, buf = cv.imencode(".jpg", image_source)
             if not ok:
-                raise RuntimeError("Encoding JPEG fallito")
+                msg = "Encoding JPEG fallito"
+                raise RuntimeError(msg)
             b64 = base64.b64encode(buf.tobytes()).decode("utf-8")
             return b64, "image/jpeg"
         path = str(image_source)
         with open(path, "rb") as f:
             b64 = base64.b64encode(f.read()).decode("utf-8")
         ext = Path(path).suffix.lower().lstrip(".")
-        media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
-                      "png": "image/png", "webp": "image/webp"}.get(ext, "image/jpeg")
+        media_type = {"jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png", "webp": "image/webp"}.get(
+            ext, "image/jpeg"
+        )
         return b64, media_type
 
 
@@ -217,7 +227,7 @@ class YOLOAnalyzer(BaseAnalyzer):
             msg = f"Cannot import YOLO ONNX backend: {e}. Make sure the yolo subpackage is on your PYTHONPATH."
             raise RuntimeError(msg)
 
-    def _run_inference(self, image_source: "str | np.ndarray") -> list[Detection]:
+    def _run_inference(self, image_source: str | np.ndarray) -> list[Detection]:
         self._load_model()
         img = self._to_bgr(image_source)
         results = self._model.predict(img)
@@ -277,7 +287,7 @@ class FoundryGPT4oAnalyzer(BaseAnalyzer):
             or "https://foundry-multimodal.cognitiveservices.azure.com/openai/deployments/gpt-4o/chat/completions?api-version=2025-01-01-preview"
         )
 
-    def _run_inference(self, image_source: "str | np.ndarray") -> list[Detection]:
+    def _run_inference(self, image_source: str | np.ndarray) -> list[Detection]:
         if not self.api_key:
             msg = "AZURE_OPENAI_KEY not set"
             raise RuntimeError(msg)
@@ -347,7 +357,7 @@ class Florence2Analyzer(BaseAnalyzer):
         self._processor = AutoProcessor.from_pretrained(self.model_id, trust_remote_code=True)
         self._model = AutoModelForCausalLM.from_pretrained(self.model_id, trust_remote_code=True).to(self.device).eval()
 
-    def _run_inference(self, image_source: "str | np.ndarray") -> list[Detection]:
+    def _run_inference(self, image_source: str | np.ndarray) -> list[Detection]:
         self._load_model()
         img = self._to_bgr(image_source)[:, :, ::-1]  # BGR→RGB
 
@@ -384,64 +394,104 @@ class Florence2Analyzer(BaseAnalyzer):
 # ---------------------------------------------------------------------------
 class MoondreamAnalyzer(BaseAnalyzer):
     """
-    Tiny VLM for local inference. Supports natural language prompting.
-    Perfect for validating YOLO detections with complex safety logic.
-    Requires: transformers, einops, pillow
+    Moondream2 per inferenza locale con prompt personalizzati.
+    Usa l'API nativa di Moondream (moondream.from_pretrained) invece di
+    AutoModelForCausalLM generico, che causava il warning 'moondream1 type'.
+
+    Il metodo principale usato dal video_tracker è query(image, prompt)
+    che bypassa il _run_inference standard e permette prompt dinamici
+    per-persona (es. "verifica se mancano Helmet, Glove").
+
+    Requires: moondream>=0.0.5  (pip install moondream)
     """
 
-    def __init__(self, model_id: str = "vikhyatk/moondream2", revision: str = "2025-06-21", device: str = "cpu"):
+    def __init__(
+        self,
+        model_id: str = "vikhyatk/moondream2",
+        revision: str = "2025-01-09",  # ultima revision stabile con API nativa
+        device: str = "cpu",
+    ):
         super().__init__("Moondream2-Local")
         self.device = device
         self.model_id = model_id
         self.revision = revision
         self._model = None
-        self._tokenizer = None
 
     def _load_model(self):
         if self._model is not None:
             return
-        from transformers import AutoModelForCausalLM, AutoTokenizer
+        try:
+            # API nativa Moondream — evita il warning AutoModelForCausalLM
+            import moondream as md
 
-        # Carichiamo il tokenizer e il modello
-        self._tokenizer = AutoTokenizer.from_pretrained(self.model_id, revision=self.revision)
-        self._model = (
-            AutoModelForCausalLM.from_pretrained(self.model_id, revision=self.revision, trust_remote_code=True)
-            .to(self.device)
-            .eval()
-        )
+            self._model = md.vl(model=self.model_id, revision=self.revision)
+        except ImportError:
+            # Fallback: pacchetto transformers con trust_remote_code
+            # (genera warning ma funziona)
+            from transformers import AutoModelForCausalLM
 
-    def _run_inference(self, image_source: "str | np.ndarray") -> list[Detection]:
+            self._model = (
+                AutoModelForCausalLM.from_pretrained(
+                    self.model_id,
+                    revision=self.revision,
+                    trust_remote_code=True,
+                )
+                .to(self.device)
+                .eval()
+            )
+
+    def query(self, image_source: str | np.ndarray, prompt: str) -> str:
+        """
+        Esegue una domanda in linguaggio naturale sull'immagine.
+        Ritorna la risposta grezza come stringa.
+        Usato da _moondream_validate nel video_tracker.
+        """
         self._load_model()
-        image = self._to_pil(image_source)
-        enc_image = self._model.encode_image(image)
+        pil_img = self._to_pil(image_source)
+        try:
+            # API nativa moondream>=0.0.5
+            enc = self._model.encode_image(pil_img)
+            return self._model.query(enc, prompt)["answer"]
+        except (AttributeError, TypeError):
+            # Fallback API transformers (answer_question)
+            enc = self._model.encode_image(pil_img)
+            return self._model.answer_question(enc, prompt, self._tokenizer)
 
-        # Moondream ha un metodo dedicato per rispondere alle domande
-        answer = self._model.answer_question(enc_image, _SAFETY_SYSTEM_PROMPT, self._tokenizer)
-
+    def _run_inference(self, image_source: str | np.ndarray) -> list[Detection]:
+        """
+        Chiamata generica (compatibilità con SafetyAnalyzerPipeline).
+        Usa il prompt generico di ispezione sicurezza.
+        Per uso nel video_tracker, usare query() con prompt specifico.
+        """
+        answer = self.query(image_source, _SAFETY_SYSTEM_PROMPT)
         detections = []
         try:
-            # Pulizia minima se il modello aggiunge chiacchiere
-            clean_answer = answer.strip()
-            if "```json" in clean_answer:
-                clean_answer = clean_answer.split("```json")[1].split("```")[0]
-
-            items = json.loads(clean_answer)
+            clean = answer.strip()
+            if "```json" in clean:
+                clean = clean.split("```json")[1].split("```")[0]
+            elif "```" in clean:
+                clean = clean.split("```")[1].strip()
+            items = json.loads(clean)
             if isinstance(items, dict):
-                items = [items]  # se restituisce un solo oggetto
-
+                items = [items]
             for item in items:
                 detections.append(
                     Detection(
                         label=item.get("label", "unknown"),
                         confidence=float(item.get("confidence", 0.7)),
-                        bbox=None,  # Moondream2 standard non restituisce bbox precisi come Florence
+                        bbox=None,
                     )
                 )
-        except:
-            # Se il parsing fallisce, facciamo un controllo testuale semplice
-            if "no_helmet" in answer.lower():
-                detections.append(Detection(label="no_helmet", confidence=0.8))
-
+        except Exception:
+            # Fallback testuale minimale
+            for kw, label in [
+                ("no_helmet", "no_helmet"),
+                ("no_vest", "no_vest"),
+                ("no_glove", "no_glove"),
+                ("no_boot", "no_boot"),
+            ]:
+                if kw in answer.lower():
+                    detections.append(Detection(label=label, confidence=0.7))
         return detections
 
 

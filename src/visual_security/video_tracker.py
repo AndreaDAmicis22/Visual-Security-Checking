@@ -23,46 +23,49 @@ Architettura:
                                       │  (finestra / file)     │
                                       └────────────────────────┘
 """
+
 from __future__ import annotations
 
+import json
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING
 
 import cv2 as cv
-import numpy as np
 
-from .analyzer import BaseAnalyzer, YOLOAnalyzer
 from .person_ppe_checker import PersonPPEChecker, PersonPPEResult
 
+if TYPE_CHECKING:
+    import numpy as np
+
+    from .analyzer import BaseAnalyzer, MoondreamAnalyzer, YOLOAnalyzer
 
 # ── Alert ─────────────────────────────────────────────────────────────────────
 
+
 @dataclass
 class FrameAlert:
-    frame_idx:    int
-    timestamp_s:  float
+    frame_idx: int
+    timestamp_s: float
     person_results: list[PersonPPEResult]
-    vlm_confirmed:  bool = False
-    vlm_response:   Optional[str] = None
+    vlm_confirmed: bool = False
+    vlm_response: str | None = None
 
     @property
     def violations(self) -> list[PersonPPEResult]:
         return [p for p in self.person_results if not p.is_compliant]
 
     def summary(self) -> str:
-        viol   = self.violations
+        viol = self.violations
         suffix = " [Moondream✓]" if self.vlm_confirmed else " [YOLO+tracker]"
-        parts  = " | ".join(p.summary() for p in viol)
-        return (
-            f"[t={self.timestamp_s:.1f}s frame={self.frame_idx}] "
-            f"{len(viol)} violazione/i{suffix}: {parts}"
-        )
+        parts = " | ".join(p.summary() for p in viol)
+        return f"[t={self.timestamp_s:.1f}s frame={self.frame_idx}] {len(viol)} violazione/i{suffix}: {parts}"
 
 
 # ── Persistence tracker ───────────────────────────────────────────────────────
+
 
 class VideoViolationTracker:
     """
@@ -76,27 +79,26 @@ class VideoViolationTracker:
     def __init__(
         self,
         threshold_frames: int = 4,
-        window:           int = 7,
-        grid:             int = 6,
-        cooldown_frames:  int = 30,
+        window: int = 7,
+        grid: int = 6,
+        cooldown_frames: int = 30,
     ):
-        self.threshold  = threshold_frames
-        self.window     = window
-        self.grid       = grid
-        self.cooldown   = cooldown_frames
-        self._history:  dict[str, deque] = {}
-        self._cooldown: dict[str, int]   = {}
+        self.threshold = threshold_frames
+        self.window = window
+        self.grid = grid
+        self.cooldown = cooldown_frames
+        self._history: dict[str, deque] = {}
+        self._cooldown: dict[str, int] = {}
 
     def _key(self, pr: PersonPPEResult, fw: int, fh: int) -> str:
         if pr.person_bbox:
-            cx = min(int(((pr.person_bbox[0]+pr.person_bbox[2])/2)/max(fw,1)*self.grid), self.grid-1)
-            cy = min(int(((pr.person_bbox[1]+pr.person_bbox[3])/2)/max(fh,1)*self.grid), self.grid-1)
+            cx = min(int(((pr.person_bbox[0] + pr.person_bbox[2]) / 2) / max(fw, 1) * self.grid), self.grid - 1)
+            cy = min(int(((pr.person_bbox[1] + pr.person_bbox[3]) / 2) / max(fh, 1) * self.grid), self.grid - 1)
         else:
             cx, cy = -1, -1
         return f"{cx}:{cy}:{'|'.join(sorted(pr.missing_ppe))}"
 
-    def update(self, person_results: list[PersonPPEResult], fw: int, fh: int
-               ) -> list[PersonPPEResult]:
+    def update(self, person_results: list[PersonPPEResult], fw: int, fh: int) -> list[PersonPPEResult]:
         active: set[str] = set()
 
         for pr in person_results:
@@ -126,8 +128,7 @@ class VideoViolationTracker:
                 confirmed.add(k)
                 self._cooldown[k] = self.cooldown
 
-        return [pr for pr in person_results
-                if not pr.is_compliant and self._key(pr, fw, fh) in confirmed]
+        return [pr for pr in person_results if not pr.is_compliant and self._key(pr, fw, fh) in confirmed]
 
     def fill(self, pr: PersonPPEResult, fw: int, fh: int) -> float:
         """Frazione della window riempita da positive (0–1)."""
@@ -140,32 +141,26 @@ class VideoViolationTracker:
 # ── Moondream VLM validator ───────────────────────────────────────────────────
 
 _MOONDREAM_PROMPT_TEMPLATE = (
-    "This image shows a construction worker. "
-    "Check if the following PPE items are MISSING from the worker: {missing}. "
-    "Answer ONLY with a JSON object where each key is a PPE item and value is "
-    "true (missing) or false (present). Example: "
-    '{"Helmet": true, "Vest": false, "Glove": true, "Shoe": false}'
+    "This image shows a construction worker cropped from a safety camera. "
+    "The following PPE items were flagged as potentially MISSING: {missing}. "
+    "For each item, answer whether it is truly MISSING (not visible at all) or PRESENT. "
+    "Reply ONLY with a JSON object, keys are the PPE items, values are true=MISSING or false=PRESENT. "
+    'Example: {{"Helmet": true, "Glove": false}}'
 )
 
 
 def _moondream_validate(
-    vlm: BaseAnalyzer,
-    image_source: "str | np.ndarray",
+    vlm: MoondreamAnalyzer,
+    image_source: str | np.ndarray,
     missing_ppe: list[str],
 ) -> tuple[bool, str]:
     """
-    Chiama Moondream sul crop della persona (ndarray BGR o path).
-    Ritorna (confermato, risposta_raw).
+    Usa MoondreamAnalyzer.query() con prompt specifico per i PPE mancanti.
+    Ritorna (almeno_uno_confermato_mancante, risposta_raw).
     """
-    import json
+    prompt = _MOONDREAM_PROMPT_TEMPLATE.format(missing=", ".join(missing_ppe))
     try:
-        if vlm._model is None:
-            vlm._load_model()
-        prompt = _MOONDREAM_PROMPT_TEMPLATE.format(missing=", ".join(missing_ppe))
-        # Usa il helper unificato — niente file su disco
-        pil_img = BaseAnalyzer._to_pil(image_source)
-        enc = vlm._model.encode_image(pil_img)
-        answer = vlm._model.answer_question(enc, prompt, vlm._tokenizer)
+        answer = vlm.query(image_source, prompt)
         clean = answer.strip()
         if "```" in clean:
             clean = clean.split("```")[1].lstrip("json").strip()
@@ -173,22 +168,22 @@ def _moondream_validate(
         confirmed = any(data.get(k, False) for k in missing_ppe)
         return confirmed, answer
     except Exception as e:
-        return True, f"[error: {e}]"
+        # In caso di errore parsing/modello: trust YOLO
+        return True, f"[parse error: {e}]"
 
 
 # ── Drawing ───────────────────────────────────────────────────────────────────
 
 _C = {
-    "green":  (40,  200,  60),
-    "red":    (0,    45, 210),
-    "yellow": (20,  190, 230),
-    "white":  (230, 230, 230),
-    "dark":   (20,   20,  20),
+    "green": (40, 200, 60),
+    "red": (0, 45, 210),
+    "yellow": (20, 190, 230),
+    "white": (230, 230, 230),
+    "dark": (20, 20, 20),
 }
 
 
-def _draw_person(img: np.ndarray, pr: PersonPPEResult,
-                 confirmed: bool, fill: float) -> None:
+def _draw_person(img: np.ndarray, pr: PersonPPEResult, confirmed: bool, fill: float) -> None:
     if pr.person_bbox is None:
         return
     x1, y1, x2, y2 = (int(v) for v in pr.person_bbox)
@@ -203,41 +198,48 @@ def _draw_person(img: np.ndarray, pr: PersonPPEResult,
         # Colore che vira verso rosso man mano che fill cresce
         g = int(190 - fill * 150)
         color = (20, g, 230)
-        label = f"[{int(fill*100)}%] {', '.join(pr.missing_ppe)}"
+        label = f"[{int(fill * 100)}%] {', '.join(pr.missing_ppe)}"
         thick = 2
 
     cv.rectangle(img, (x1, y1), (x2, y2), color, thick)
-    cv.putText(img, label, (x1, max(y1 - 8, 14)),
-               cv.FONT_HERSHEY_SIMPLEX, 0.52, color, 2, cv.LINE_AA)
+    cv.putText(img, label, (x1, max(y1 - 8, 14)), cv.FONT_HERSHEY_SIMPLEX, 0.52, color, 2, cv.LINE_AA)
 
     cy = y1 + 18
     for cat, req in PersonPPEChecker.FULL_PPE.items():
         found = pr.found_ppe.get(cat, 0)
-        ok    = found >= req
-        c     = _C["green"] if ok else _C["red"]
-        mark  = chr(0x2714) if ok else chr(0x2718)
-        cv.putText(img, f"{mark} {cat} {found}/{req}",
-                   (x1 + 4, cy), cv.FONT_HERSHEY_SIMPLEX, 0.38, c, 1, cv.LINE_AA)
+        ok = found >= req
+        c = _C["green"] if ok else _C["red"]
+        mark = chr(0x2714) if ok else chr(0x2718)
+        cv.putText(img, f"{mark} {cat} {found}/{req}", (x1 + 4, cy), cv.FONT_HERSHEY_SIMPLEX, 0.38, c, 1, cv.LINE_AA)
         cy += 15
 
 
-def _draw_hud(img: np.ndarray, frame_idx: int, fps: float,
-              yolo_ms: float, n_persons: int, n_pending: int,
-              n_alerts: int, vlm_calls: int) -> None:
+def _draw_hud(
+    img: np.ndarray,
+    frame_idx: int,
+    fps: float,
+    yolo_ms: float,
+    n_persons: int,
+    n_pending: int,
+    n_alerts: int,
+    vlm_calls: int,
+) -> None:
     ov = img.copy()
     cv.rectangle(ov, (0, 0), (340, 135), _C["dark"], -1)
     cv.addWeighted(ov, 0.55, img, 0.45, 0, img)
-    for i, line in enumerate([
-        f"Frame {frame_idx:>6}    FPS {fps:>5.1f}",
-        f"YOLO  {yolo_ms:>7.1f} ms",
-        f"Persone {n_persons:>3}   In attesa {n_pending:>3}",
-        f"Alert   {n_alerts:>3}   VLM calls {vlm_calls:>4}",
-    ]):
-        cv.putText(img, line, (8, 22 + i * 27),
-                   cv.FONT_HERSHEY_SIMPLEX, 0.52, _C["white"], 1, cv.LINE_AA)
+    for i, line in enumerate(
+        [
+            f"Frame {frame_idx:>6}    FPS {fps:>5.1f}",
+            f"YOLO  {yolo_ms:>7.1f} ms",
+            f"Persone {n_persons:>3}   In attesa {n_pending:>3}",
+            f"Alert   {n_alerts:>3}   VLM calls {vlm_calls:>4}",
+        ]
+    ):
+        cv.putText(img, line, (8, 22 + i * 27), cv.FONT_HERSHEY_SIMPLEX, 0.52, _C["white"], 1, cv.LINE_AA)
 
 
 # ── VideoSafetyTracker ────────────────────────────────────────────────────────
+
 
 class VideoSafetyTracker:
     """
@@ -260,41 +262,41 @@ class VideoSafetyTracker:
 
     def __init__(
         self,
-        yolo_analyzer:      YOLOAnalyzer,
-        vlm_validator:      BaseAnalyzer | None = None,
-        ppe_checker:        PersonPPEChecker | None = None,
-        persistence_frames: int  = 4,
-        window_frames:      int  = 7,
-        skip_frames:        int  = 1,
-        display:            bool = True,
-        save_output:        str | Path | None = None,
-        alert_log_path:     str | Path | None = None,
-        max_alerts:         int  = 0,
-        verbose:            bool = False,
+        yolo_analyzer: YOLOAnalyzer,
+        vlm_validator: BaseAnalyzer | None = None,
+        ppe_checker: PersonPPEChecker | None = None,
+        persistence_frames: int = 4,
+        window_frames: int = 7,
+        skip_frames: int = 1,
+        display: bool = True,
+        save_output: str | Path | None = None,
+        alert_log_path: str | Path | None = None,
+        max_alerts: int = 0,
+        verbose: bool = False,
     ):
-        self.yolo    = yolo_analyzer
-        self.vlm     = vlm_validator
+        self.yolo = yolo_analyzer
+        self.vlm = vlm_validator
         self.checker = ppe_checker or PersonPPEChecker()
         self._vio_tracker = VideoViolationTracker(
             threshold_frames=persistence_frames,
             window=max(window_frames, persistence_frames),
         )
-        self.skip_frames    = max(1, skip_frames)
-        self.display        = display
-        self.save_output    = Path(save_output) if save_output else None
+        self.skip_frames = max(1, skip_frames)
+        self.display = display
+        self.save_output = Path(save_output) if save_output else None
         self.alert_log_path = Path(alert_log_path) if alert_log_path else None
-        self.max_alerts     = max_alerts
-        self.verbose        = verbose
+        self.max_alerts = max_alerts
+        self.verbose = verbose
 
         self._vlm_calls = 0
         self._alerts: list[FrameAlert] = []
 
     # ── Entry point ────────────────────────────────────────────────────────────
-
     def run(self, source: str | int = 0) -> list[FrameAlert]:
         cap = cv.VideoCapture(source)
         if not cap.isOpened():
-            raise RuntimeError(f"Impossibile aprire la sorgente video: {source!r}")
+            msg = f"Impossibile aprire la sorgente video: {source!r}"
+            raise RuntimeError(msg)
 
         fps_src = cap.get(cv.CAP_PROP_FPS) or 25.0
         fw = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
@@ -306,14 +308,15 @@ class VideoSafetyTracker:
             writer = cv.VideoWriter(
                 str(self.save_output),
                 cv.VideoWriter_fourcc(*"mp4v"),
-                fps_src, (fw, fh),
+                fps_src,
+                (fw, fh),
             )
 
-        frame_idx  = 0
-        last_ppr:  list[PersonPPEResult] = []
-        last_ms    = 0.0
-        fps_buf    = deque(maxlen=30)
-        t_last     = time.perf_counter()
+        frame_idx = 0
+        last_ppr: list[PersonPPEResult] = []
+        last_ms = 0.0
+        fps_buf = deque(maxlen=30)
+        t_last = time.perf_counter()
 
         try:
             while True:
@@ -324,13 +327,13 @@ class VideoSafetyTracker:
                 frame_idx += 1
                 t_now = time.perf_counter()
                 fps_buf.append(1.0 / max(t_now - t_last, 1e-6))
-                t_last   = t_now
+                t_last = t_now
                 live_fps = sum(fps_buf) / len(fps_buf)
 
                 # ── YOLO + PPE check ─────────────────────────────────────────
                 if (frame_idx - 1) % self.skip_frames == 0:
-                    yolo_res = self.yolo.analyze(frame)   # ndarray diretto, niente disco
-                    last_ms  = yolo_res.inference_time_ms
+                    yolo_res = self.yolo.analyze(frame)  # ndarray diretto, niente disco
+                    last_ms = yolo_res.inference_time_ms
 
                     if yolo_res.error:
                         if self.verbose:
@@ -340,8 +343,7 @@ class VideoSafetyTracker:
                         last_ppr = self.checker.check(yolo_res.detections, fw, fh)
 
                         if self.verbose:
-                            print(f"\n[frame {frame_idx}] {len(yolo_res.detections)} det → "
-                                  f"{len(last_ppr)} persone")
+                            print(f"\n[frame {frame_idx}] {len(yolo_res.detections)} det → {len(last_ppr)} persone")
                             for pr in last_ppr:
                                 print(f"  {pr.summary()}")
 
@@ -350,9 +352,7 @@ class VideoSafetyTracker:
 
                 # ── VLM validation + alert ───────────────────────────────────
                 if confirmed:
-                    alert = self._make_alert(frame, frame_idx,
-                                             cap.get(cv.CAP_PROP_POS_MSEC)/1000.0,
-                                             last_ppr, confirmed)
+                    alert = self._make_alert(frame, frame_idx, cap.get(cv.CAP_PROP_POS_MSEC) / 1000.0, last_ppr, confirmed)
                     self._alerts.append(alert)
                     print(alert.summary())
                     if self.max_alerts and len(self._alerts) >= self.max_alerts:
@@ -364,11 +364,8 @@ class VideoSafetyTracker:
                     fill = self._vio_tracker.fill(pr, fw, fh)
                     _draw_person(frame, pr, pr.person_idx in confirmed_idxs, fill)
 
-                n_pending = sum(1 for pr in last_ppr
-                                if not pr.is_compliant
-                                and pr.person_idx not in confirmed_idxs)
-                _draw_hud(frame, frame_idx, live_fps, last_ms,
-                          len(last_ppr), n_pending, len(self._alerts), self._vlm_calls)
+                n_pending = sum(1 for pr in last_ppr if not pr.is_compliant and pr.person_idx not in confirmed_idxs)
+                _draw_hud(frame, frame_idx, live_fps, last_ms, len(last_ppr), n_pending, len(self._alerts), self._vlm_calls)
 
                 if writer:
                     writer.write(frame)
@@ -391,8 +388,7 @@ class VideoSafetyTracker:
     # ── VLM ───────────────────────────────────────────────────────────────────
 
     def _make_alert(self, frame, frame_idx, ts, all_ppr, confirmed) -> FrameAlert:
-        alert = FrameAlert(frame_idx=frame_idx, timestamp_s=ts,
-                           person_results=all_ppr)
+        alert = FrameAlert(frame_idx=frame_idx, timestamp_s=ts, person_results=all_ppr)
         if self.vlm is None:
             alert.vlm_confirmed = True
             return alert
@@ -412,7 +408,7 @@ class VideoSafetyTracker:
             vlm_resp_parts.append(f"Person#{pr.person_idx}: {resp}")
 
         alert.vlm_confirmed = any_confirmed
-        alert.vlm_response  = " | ".join(vlm_resp_parts) or None
+        alert.vlm_response = " | ".join(vlm_resp_parts) or None
         return alert
 
     @staticmethod
@@ -420,8 +416,10 @@ class VideoSafetyTracker:
         if pr.person_bbox is None:
             return None
         h, w = frame.shape[:2]
-        x1 = max(0, int(pr.person_bbox[0]));  y1 = max(0, int(pr.person_bbox[1]))
-        x2 = min(w, int(pr.person_bbox[2]));  y2 = min(h, int(pr.person_bbox[3]))
+        x1 = max(0, int(pr.person_bbox[0]))
+        y1 = max(0, int(pr.person_bbox[1]))
+        x2 = min(w, int(pr.person_bbox[2]))
+        y2 = min(h, int(pr.person_bbox[3]))
         if x2 <= x1 or y2 <= y1:
             return None
         return frame[y1:y2, x1:x2]
@@ -430,14 +428,20 @@ class VideoSafetyTracker:
 
     def _save_log(self):
         import json
+
         data = [
             {
-                "frame": a.frame_idx, "timestamp_s": round(a.timestamp_s, 2),
-                "vlm_confirmed": a.vlm_confirmed, "vlm_response": a.vlm_response,
+                "frame": a.frame_idx,
+                "timestamp_s": round(a.timestamp_s, 2),
+                "vlm_confirmed": a.vlm_confirmed,
+                "vlm_response": a.vlm_response,
                 "violations": [
-                    {"person_idx": p.person_idx, "missing_ppe": p.missing_ppe,
-                     "found_ppe": p.found_ppe,
-                     "bbox": list(p.person_bbox) if p.person_bbox else None}
+                    {
+                        "person_idx": p.person_idx,
+                        "missing_ppe": p.missing_ppe,
+                        "found_ppe": p.found_ppe,
+                        "bbox": list(p.person_bbox) if p.person_bbox else None,
+                    }
                     for p in a.violations
                 ],
             }
@@ -450,18 +454,19 @@ class VideoSafetyTracker:
 
 # ── Factory ───────────────────────────────────────────────────────────────────
 
+
 def build_hybrid_tracker(
-    yolo_model_path:    str,
-    vlm_backend:        str   = "none",      # "moondream" | "none"
-    vlm_device:         str   = "cpu",
-    persistence_frames: int   = 4,
-    window_frames:      int   = 7,
-    skip_frames:        int   = 1,
-    display:            bool  = True,
-    save_output:        str | None = None,
-    alert_log:          str | None = None,
-    yolo_conf:          float = 0.30,
-    verbose:            bool  = False,
+    yolo_model_path: str,
+    vlm_backend: str = "none",  # "moondream" | "none"
+    vlm_device: str = "cpu",
+    persistence_frames: int = 4,
+    window_frames: int = 7,
+    skip_frames: int = 1,
+    display: bool = True,
+    save_output: str | None = None,
+    alert_log: str | None = None,
+    yolo_conf: float = 0.30,
+    verbose: bool = False,
 ) -> VideoSafetyTracker:
     """
     Factory rapida.
@@ -472,22 +477,22 @@ def build_hybrid_tracker(
             yolo_model_path="weights/best.onnx",
             save_output="output/annotated.mp4",
             alert_log="output/alerts.json",
-            verbose=True,    # stampa detection ogni frame
+            verbose=True,  # stampa detection ogni frame
         )
         tracker.run("test.mp4")
     """
     from .analyzer import YOLOAnalyzer
+
     yolo = YOLOAnalyzer(model_path=yolo_model_path, conf_threshold=yolo_conf)
 
     vlm: BaseAnalyzer | None = None
     if vlm_backend == "moondream":
         from .analyzer import MoondreamAnalyzer
+
         vlm = MoondreamAnalyzer(device=vlm_device)
     elif vlm_backend not in ("none", ""):
-        raise ValueError(
-            f"vlm_backend={vlm_backend!r} non riconosciuto. "
-            "Usa 'moondream' o 'none'."
-        )
+        msg = f"vlm_backend={vlm_backend!r} non riconosciuto. Usa 'moondream' o 'none'."
+        raise ValueError(msg)
 
     return VideoSafetyTracker(
         yolo_analyzer=yolo,

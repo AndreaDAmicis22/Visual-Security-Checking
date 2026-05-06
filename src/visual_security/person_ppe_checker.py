@@ -191,6 +191,36 @@ class PersonPPEChecker:
         self.no_bbox_policy = no_bbox_policy
         self.vlm_trigger_missing = vlm_trigger_missing
 
+    # ── PPE che tendono a stare FUORI dalla bbox persona ──────────────────────
+    # Gloves → mani ai lati (espandi orizzontalmente)
+    # Shoes  → piedi sotto (espandi verso il basso)
+    # Helmet → testa sopra (espandi verso l'alto)
+    _EXPANDED_PPE = {"Glove", "Shoe", "Helmet"}
+
+    def _expand_bbox(self, p_box: tuple, fw: int, fh: int, ppe_cat: str) -> tuple:
+        """
+        Ritorna una bbox allargata della persona per catturare
+        PPE che fisicamente escono dal bordo del corpo.
+        - Glove: +40% larghezza su entrambi i lati
+        - Shoe:  +40% altezza verso il basso, +15% larghezza
+        - Helmet: +20% altezza verso l'alto, +10% larghezza
+        """
+        x1, y1, x2, y2 = p_box
+        w = x2 - x1
+        h = y2 - y1
+        if ppe_cat == "Glove":
+            pad_x = w * 0.40
+            return (max(0, x1 - pad_x), y1, min(fw, x2 + pad_x), y2)
+        if ppe_cat == "Shoe":
+            pad_y = h * 0.40
+            pad_x = w * 0.15
+            return (max(0, x1 - pad_x), y1, min(fw, x2 + pad_x), min(fh, y2 + pad_y))
+        if ppe_cat == "Helmet":
+            pad_y = h * 0.20
+            pad_x = w * 0.10
+            return (max(0, x1 - pad_x), max(0, y1 - pad_y), min(fw, x2 + pad_x), y2)
+        return p_box
+
     def check(self, detections: list, frame_w: int = 640, frame_h: int = 640) -> list[PersonPPEResult]:
         """
         Ritorna un PersonPPEResult per ogni Person rilevata.
@@ -224,7 +254,9 @@ class PersonPPEChecker:
                 p_box = person_boxes.get(p_i)
                 if p_box is None:
                     continue
-                score = _overlap_ratio(item_box, p_box)
+                # Usa la bbox espansa per PPE che escono dal corpo
+                search_box = self._expand_bbox(p_box, frame_w, frame_h, ppe_cat) if ppe_cat in self._EXPANDED_PPE else p_box
+                score = _overlap_ratio(item_box, search_box)
                 if score >= self.containment_threshold and score > best_score:
                     best_score = score
                     best_pidx = p_i
