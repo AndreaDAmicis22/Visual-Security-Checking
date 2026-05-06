@@ -42,9 +42,8 @@ if TYPE_CHECKING:
 
     from .analyzer import BaseAnalyzer, MoondreamAnalyzer, YOLOAnalyzer
 
+
 # ── Alert ─────────────────────────────────────────────────────────────────────
-
-
 @dataclass
 class FrameAlert:
     frame_idx: int
@@ -65,8 +64,6 @@ class FrameAlert:
 
 
 # ── Persistence tracker ───────────────────────────────────────────────────────
-
-
 class VideoViolationTracker:
     """
     Sliding-window tracker per (cella_griglia × PPE_mancanti).
@@ -139,7 +136,6 @@ class VideoViolationTracker:
 
 
 # ── Moondream VLM validator ───────────────────────────────────────────────────
-
 _MOONDREAM_PROMPT_TEMPLATE = (
     "This image shows a construction worker cropped from a safety camera. "
     "The following PPE items were flagged as potentially MISSING: {missing}. "
@@ -161,6 +157,7 @@ def _moondream_validate(
     prompt = _MOONDREAM_PROMPT_TEMPLATE.format(missing=", ".join(missing_ppe))
     try:
         answer = vlm.query(image_source, prompt)
+        print(f"VLM Answer raw: {answer}")
         clean = answer.strip()
         if "```" in clean:
             clean = clean.split("```")[1].lstrip("json").strip()
@@ -168,12 +165,11 @@ def _moondream_validate(
         confirmed = any(data.get(k, False) for k in missing_ppe)
         return confirmed, answer
     except Exception as e:
-        # In caso di errore parsing/modello: trust YOLO
+        print(f"VLM error: {e}")
         return True, f"[parse error: {e}]"
 
 
 # ── Drawing ───────────────────────────────────────────────────────────────────
-
 _C = {
     "green": (40, 200, 60),
     "red": (0, 45, 210),
@@ -195,7 +191,6 @@ def _draw_person(img: np.ndarray, pr: PersonPPEResult, confirmed: bool, fill: fl
         label = f"ALERT: {', '.join(pr.missing_ppe)}"
         thick = 3
     else:
-        # Colore che vira verso rosso man mano che fill cresce
         g = int(190 - fill * 150)
         color = (20, g, 230)
         label = f"[{int(fill * 100)}%] {', '.join(pr.missing_ppe)}"
@@ -239,8 +234,6 @@ def _draw_hud(
 
 
 # ── VideoSafetyTracker ────────────────────────────────────────────────────────
-
-
 class VideoSafetyTracker:
     """
     Pipeline completa di tracking video per la sicurezza PPE.
@@ -386,7 +379,6 @@ class VideoSafetyTracker:
         return self._alerts
 
     # ── VLM ───────────────────────────────────────────────────────────────────
-
     def _make_alert(self, frame, frame_idx, ts, all_ppr, confirmed) -> FrameAlert:
         alert = FrameAlert(frame_idx=frame_idx, timestamp_s=ts, person_results=all_ppr)
         if self.vlm is None:
@@ -396,7 +388,7 @@ class VideoSafetyTracker:
         any_confirmed = False
         vlm_resp_parts: list[str] = []
         for pr in confirmed:
-            crop = self._crop(frame, pr)
+            crop = self._crop(frame, pr, pad_ratio=0.30)
             if crop is None:
                 any_confirmed = True
                 continue
@@ -412,20 +404,28 @@ class VideoSafetyTracker:
         return alert
 
     @staticmethod
-    def _crop(frame: np.ndarray, pr: PersonPPEResult):
+    def _crop(frame: np.ndarray, pr: PersonPPEResult, pad_ratio: float = 0.30) -> np.ndarray | None:
+        """
+        Ritaglie la persona dal frame espandendo i bordi del 30% per fornire
+        contesto al VLM (Moondream) ed evitare tagli su elmetti o scarpe.
+        """
         if pr.person_bbox is None:
             return None
         h, w = frame.shape[:2]
-        x1 = max(0, int(pr.person_bbox[0]))
-        y1 = max(0, int(pr.person_bbox[1]))
-        x2 = min(w, int(pr.person_bbox[2]))
-        y2 = min(h, int(pr.person_bbox[3]))
-        if x2 <= x1 or y2 <= y1:
+        x1, y1, x2, y2 = pr.person_bbox
+        w_orig = x2 - x1
+        h_orig = y2 - y1
+        pad_w = w_orig * pad_ratio
+        pad_h = h_orig * pad_ratio
+        nx1 = max(0, int(x1 - pad_w))
+        ny1 = max(0, int(y1 - pad_h))
+        nx2 = min(w, int(x2 + pad_w))
+        ny2 = min(h, int(y2 + pad_h))
+        if nx2 <= nx1 or ny2 <= ny1:
             return None
-        return frame[y1:y2, x1:x2]
+        return frame[ny1:ny2, nx1:nx2]
 
     # ── Log ───────────────────────────────────────────────────────────────────
-
     def _save_log(self):
         import json
 
@@ -453,8 +453,6 @@ class VideoSafetyTracker:
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────
-
-
 def build_hybrid_tracker(
     yolo_model_path: str,
     vlm_backend: str = "none",  # "moondream" | "none"

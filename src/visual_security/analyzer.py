@@ -11,6 +11,7 @@ Supports:
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import os
 import sys
@@ -23,6 +24,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import cv2 as cv
+from dotenv import load_dotenv
+from transformers import AutoModelForCausalLM
 
 if TYPE_CHECKING:
     import numpy as np
@@ -352,7 +355,7 @@ class Florence2Analyzer(BaseAnalyzer):
     def _load_model(self):
         if self._model is not None:
             return
-        from transformers import AutoModelForCausalLM, AutoProcessor
+        from transformers import AutoProcessor
 
         self._processor = AutoProcessor.from_pretrained(self.model_id, trust_remote_code=True)
         self._model = AutoModelForCausalLM.from_pretrained(self.model_id, trust_remote_code=True).to(self.device).eval()
@@ -400,9 +403,7 @@ class MoondreamAnalyzer(BaseAnalyzer):
 
     Il metodo principale usato dal video_tracker è query(image, prompt)
     che bypassa il _run_inference standard e permette prompt dinamici
-    per-persona (es. "verifica se mancano Helmet, Glove").
-
-    Requires: moondream>=0.0.5  (pip install moondream)
+    per-persona (es. "verifica se mancano Helmet, Glove")
     """
 
     def __init__(
@@ -416,29 +417,35 @@ class MoondreamAnalyzer(BaseAnalyzer):
         self.model_id = model_id
         self.revision = revision
         self._model = None
+        self._tokenizer = None
 
     def _load_model(self):
         if self._model is not None:
             return
-        try:
-            # API nativa Moondream — evita il warning AutoModelForCausalLM
-            import moondream as md
 
-            self._model = md.vl(model=self.model_id, revision=self.revision)
-        except ImportError:
-            # Fallback: pacchetto transformers con trust_remote_code
-            # (genera warning ma funziona)
-            from transformers import AutoModelForCausalLM
+        load_dotenv()
+        hf_token = os.getenv("HF_TOKEN")
 
-            self._model = (
-                AutoModelForCausalLM.from_pretrained(
-                    self.model_id,
-                    revision=self.revision,
-                    trust_remote_code=True,
-                )
-                .to(self.device)
-                .eval()
+        import torch
+        from transformers import AutoTokenizer
+
+        self._tokenizer = AutoTokenizer.from_pretrained(self.model_id, token=hf_token, trust_remote_code=True)
+
+        self._model = (
+            AutoModelForCausalLM.from_pretrained(
+                self.model_id,
+                revision=self.revision,
+                trust_remote_code=True,
+                token=hf_token,
+                torch_dtype=torch.float32,
             )
+            .to(self.device)
+            .eval()
+        )
+
+        if hasattr(self._model, "vision_encoder"):
+            with contextlib.suppress(Exception):
+                self._model.vision_encoder.use_vips = False
 
     def query(self, image_source: str | np.ndarray, prompt: str) -> str:
         """
@@ -449,11 +456,9 @@ class MoondreamAnalyzer(BaseAnalyzer):
         self._load_model()
         pil_img = self._to_pil(image_source)
         try:
-            # API nativa moondream>=0.0.5
             enc = self._model.encode_image(pil_img)
             return self._model.query(enc, prompt)["answer"]
         except (AttributeError, TypeError):
-            # Fallback API transformers (answer_question)
             enc = self._model.encode_image(pil_img)
             return self._model.answer_question(enc, prompt, self._tokenizer)
 
@@ -483,7 +488,6 @@ class MoondreamAnalyzer(BaseAnalyzer):
                     )
                 )
         except Exception:
-            # Fallback testuale minimale
             for kw, label in [
                 ("no_helmet", "no_helmet"),
                 ("no_vest", "no_vest"),
@@ -542,41 +546,32 @@ class SafetyHybridPipeline:
     def __init__(self, primary_yolo: YOLOAnalyzer, validator_vlm: Florence2Analyzer):
         self.yolo = primary_yolo
         self.validator = validator_vlm
-        # Soglia di persistenza: 10 frame di fila prima di chiamare il VLM
         self.tracker = PersistenceTracker(threshold_frames=10)
 
     def analyze_frame(self, image_path: str) -> dict:
         # Step 1: YOLO Inference
         yolo_res = self.yolo.analyze(image_path)
-
-        # Estraiamo i nomi delle violazioni rilevate (es. "Non-Helmet", "Bare-arm")
         current_violations = [d.label for d in yolo_res.violations]
 
         # Step 2: Temporal Filtering (Evitiamo glitch momentanei)
         confirmed_by_tracker = self.tracker.update(current_violations)
-
         final_result = {"yolo_detections": yolo_res.detections, "status": "SAFE", "validated_violations": [], "alerts": []}
 
-        # Step 3: Validazione con Florence-2
+        # Step 3: Validazione
         if confirmed_by_tracker:
             print(f"[*] Validating persistent violations: {confirmed_by_tracker}...")
             vlm_res = self.validator.analyze(image_path)
             vlm_labels = [d.label for d in vlm_res.detections]
 
             for v_label in confirmed_by_tracker:
-                # Esempio logico: se YOLO vede "Non-Helmet"
-                # Florence-2 DEVE trovare "safety_helmet" per dire che è SAFE.
-                # Se NON lo trova, confermiamo l'allerta.
-
                 if v_label == "Non-Helmet":
                     if "safety_helmet" not in vlm_labels:
                         final_result["validated_violations"].append("MISSING_HELMET")
                         final_result["status"] = "ALERT"
 
-                elif v_label == "Vest":  # Se YOLO fosse incerto
-                    if "safety_vest" in vlm_labels:
-                        # Conferma positiva
-                        pass
+                elif v_label == "Vest" and "safety_vest" in vlm_labels:
+                    # Conferma positiva
+                    pass
 
                 # Aggiungi qui altre logiche per Bare-arm o Glove...
 
