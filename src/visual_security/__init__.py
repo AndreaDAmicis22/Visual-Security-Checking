@@ -1,35 +1,22 @@
 """
-Visual Security Checking — PPE detection for construction sites.
+Visual Security — PPE detection and tracking for construction sites.
+
+Pipeline: YOLO (detection) + Ollama VLM (escalation/validation).
 """
 
-from .analyzer import (
-    AnalysisResult,
-    BaseAnalyzer,
-    Detection,
-    Florence2Analyzer,
-    FoundryGPT4oAnalyzer,
-    PaliGemmaAnalyzer,
-    PersistenceTracker,
-    SafetyAnalyzerPipeline,
-    SafetyHybridPipeline,
-    YOLOAnalyzer,
-)
+from .analyzer import AnalysisResult, BaseAnalyzer, Detection, YOLOAnalyzer
 from .person_ppe_checker import PersonPPEChecker, PersonPPEResult
-from .video_tracker import VideoSafetyTracker, build_hybrid_tracker
+from .video_tracker import VideoSafetyTracker, build_tracker
+from .vlm_validator import OllamaVLMValidator
 
 __all__ = [
     "AnalysisResult",
     "BaseAnalyzer",
     "Detection",
-    "Florence2Analyzer",
-    "FoundryGPT4oAnalyzer",
-    "PaliGemmaAnalyzer",
-    "PersistenceTracker",
+    "OllamaVLMValidator",
     "PersonPPEChecker",
     "PersonPPEResult",
-    "SafetyAnalyzerPipeline",
-    "SafetyHybridPipeline",
     "VideoSafetyTracker",
     "YOLOAnalyzer",
-    "build_hybrid_tracker",
+    "build_tracker",
 ]

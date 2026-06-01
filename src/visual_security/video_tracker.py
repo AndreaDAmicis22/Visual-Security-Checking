@@ -1,7 +1,7 @@
 """
-Real-Time Video Safety Tracker — pipeline ibrida YOLO + PPEChecker + PaliGemma2 (opzionale).
+Real-Time Video Safety Tracker — pipeline YOLO + PPEChecker + VLM (Ollama).
 
-Architettura:
+Architecture:
 
   ┌────────────────┐  ogni N frame    ┌────────────────────────┐
   │  YOLO (veloce) │ ─ detections ──► │  PersonPPEChecker      │
@@ -14,7 +14,7 @@ Architettura:
                                       └───────────┬────────────┘
                                                   │ violazioni confermate
                                       ┌───────────▼────────────┐
-                                      │  PaliGemma2 (locale)   │  ← opzionale
+                                      │  Ollama VLM (locale)   │  ← opzionale
                                       │  crop persona + prompt │
                                       └───────────┬────────────┘
                                                   │ FrameAlert
@@ -40,7 +40,8 @@ from .person_ppe_checker import PersonPPEChecker, PersonPPEResult
 if TYPE_CHECKING:
     import numpy as np
 
-    from .analyzer import BaseAnalyzer, PaliGemmaAnalyzer, YOLOAnalyzer
+    from .analyzer import YOLOAnalyzer
+    from .vlm_validator import OllamaVLMValidator
 
 
 # ── Alert ─────────────────────────────────────────────────────────────────────
@@ -135,60 +136,6 @@ class VideoViolationTracker:
         return sum(dq) / len(dq)
 
 
-# ── PaliGemma2 VLM validator ───────────────────────────────────────────────────
-_VLM_PROMPT_TEMPLATE = (
-    "This image shows a construction worker cropped from a safety camera. "
-    "The following PPE items were flagged as potentially MISSING: {missing}. "
-    "For each item, answer whether it is truly MISSING (not visible at all) or PRESENT. "
-    "Reply ONLY with a JSON object, keys are the PPE items, values are true=MISSING or false=PRESENT. "
-    'Example: {{"Helmet": true, "Glove": false}}'
-)
-
-
-def _vlm_validate(
-    vlm: PaliGemmaAnalyzer,
-    image_source: str | np.ndarray,
-    missing_ppe: list[str],
-) -> tuple[bool, str]:
-    """
-    Usa PaliGemmaAnalyzer.query() con prompt specifico per i PPE mancanti.
-    Ritorna (almeno_uno_confermato_mancante, risposta_raw).
-
-    In caso di errore del VLM → return False: la decisione viene lasciata
-    al solo YOLO+tracker, senza confermare automaticamente la violazione.
-    """
-    prompt = _VLM_PROMPT_TEMPLATE.format(missing=", ".join(missing_ppe))
-    try:
-        answer = vlm.query(image_source, prompt)
-        print(f"[VLM] risposta raw: {answer}")
-    except Exception as e:
-        # VLM non disponibile o errore di inferenza → skip, non confermare
-        print(f"[VLM] errore inferenza, skip: {e}")
-        return False, f"[inference error: {e}]"
-
-    # ── Parsing JSON ──────────────────────────────────────────────────────────
-    try:
-        clean = answer.strip()
-        # Rimuovi eventuale code fence markdown
-        if "```" in clean:
-            block = clean.split("```")[1]
-            clean = block.lstrip("json").strip()
-        # Cerca la prima coppia {...} nel testo nel caso il modello aggiunga
-        # testo libero prima o dopo il JSON
-        start = clean.find("{")
-        end = clean.rfind("}") + 1
-        if start != -1 and end > start:
-            clean = clean[start:end]
-        data = json.loads(clean)
-        confirmed = any(data.get(k, False) for k in missing_ppe)
-        return confirmed, answer
-    except Exception as e:
-        # JSON non parseable → il VLM ha risposto in modo libero.
-        # Non confermiamo: lasciamo la decisione al tracker.
-        print(f"[VLM] parsing JSON fallito, skip: {e} | risposta: {answer!r}")
-        return False, f"[parse error: {e}]"
-
-
 # ── Drawing ───────────────────────────────────────────────────────────────────
 _C = {
     "green": (40, 200, 60),
@@ -261,7 +208,7 @@ class VideoSafetyTracker:
     Parameters
     ----------
     yolo_analyzer       YOLOAnalyzer configurato.
-    vlm_validator       PaliGemmaAnalyzer opzionale per validazione crop.
+    vlm_validator       OllamaVLMValidator opzionale per validazione crop.
     ppe_checker         PersonPPEChecker (default: set PPE completo).
     persistence_frames  Frame positivi necessari nella window per confermare.
     window_frames       Larghezza sliding window (≥ persistence_frames).
@@ -276,7 +223,7 @@ class VideoSafetyTracker:
     def __init__(
         self,
         yolo_analyzer: YOLOAnalyzer,
-        vlm_validator: BaseAnalyzer | None = None,
+        vlm_validator: OllamaVLMValidator | None = None,
         ppe_checker: PersonPPEChecker | None = None,
         persistence_frames: int = 4,
         window_frames: int = 7,
@@ -345,14 +292,13 @@ class VideoSafetyTracker:
 
                 # ── YOLO + PPE check ─────────────────────────────────────────
                 if (frame_idx - 1) % self.skip_frames == 0:
-                    yolo_res = self.yolo.analyze(frame)  # ndarray diretto, niente disco
+                    yolo_res = self.yolo.analyze(frame)
                     last_ms = yolo_res.inference_time_ms
 
                     if yolo_res.error:
                         if self.verbose:
                             print(f"[frame {frame_idx}] YOLO error: {yolo_res.error}")
                     else:
-                        # Passa le dimensioni reali del frame per denormalizzare bbox
                         last_ppr = self.checker.check(yolo_res.detections, fw, fh)
 
                         if self.verbose:
@@ -403,7 +349,6 @@ class VideoSafetyTracker:
         alert = FrameAlert(frame_idx=frame_idx, timestamp_s=ts, person_results=all_ppr)
 
         if self.vlm is None:
-            # Nessun VLM configurato: la violazione è confermata dal solo tracker
             alert.vlm_confirmed = False
             alert.vlm_response = "VLM non configurato — decisione da YOLO+tracker"
             return alert
@@ -414,28 +359,22 @@ class VideoSafetyTracker:
         for pr in confirmed:
             crop = self._crop(frame, pr, pad_ratio=0.30)
             if crop is None:
-                # Crop non riuscito (bbox fuori frame): skip VLM per questa persona
-                vlm_resp_parts.append(f"Person#{pr.person_idx}: [crop non disponibile, skip VLM]")
+                vlm_resp_parts.append(f"Person#{pr.person_idx}: [crop non disponibile]")
                 continue
 
-            ok, resp = _vlm_validate(self.vlm, crop, pr.missing_ppe)
+            ok, resp = self.vlm.validate_missing_ppe(crop, pr.missing_ppe)
             self._vlm_calls += 1
             if ok:
                 vlm_confirmed_count += 1
             vlm_resp_parts.append(f"Person#{pr.person_idx}: {resp}")
 
-        # vlm_confirmed=True solo se almeno una persona è stata confermata
-        # dal VLM con risposta valida — non per default o per errori
         alert.vlm_confirmed = vlm_confirmed_count > 0
         alert.vlm_response = " | ".join(vlm_resp_parts) or None
         return alert
 
     @staticmethod
     def _crop(frame: np.ndarray, pr: PersonPPEResult, pad_ratio: float = 0.30) -> np.ndarray | None:
-        """
-        Ritaglie la persona dal frame espandendo i bordi del 30% per fornire
-        contesto al VLM (PaliGemma2) ed evitare tagli su elmetti o scarpe.
-        """
+        """Crop the person from the frame with padding for VLM context."""
         if pr.person_bbox is None:
             return None
         h, w = frame.shape[:2]
@@ -454,8 +393,6 @@ class VideoSafetyTracker:
 
     # ── Log ───────────────────────────────────────────────────────────────────
     def _save_log(self):
-        import json
-
         data = [
             {
                 "frame": a.frame_idx,
@@ -480,10 +417,10 @@ class VideoSafetyTracker:
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────
-def build_hybrid_tracker(
+def build_tracker(
     yolo_model_path: str,
-    vlm_backend: str = "none",  # "paligemma" | "none"
-    vlm_device: str = "cpu",
+    vlm_model: str = "none",
+    vlm_url: str = "http://localhost:11434",
     persistence_frames: int = 4,
     window_frames: int = 7,
     skip_frames: int = 1,
@@ -494,15 +431,22 @@ def build_hybrid_tracker(
     verbose: bool = False,
 ) -> VideoSafetyTracker:
     """
-    Factory rapida.
+    Factory function per creare il tracker.
 
-    Esempio::
+    Parameters
+    ----------
+    vlm_model : str
+        Nome del modello Ollama per la validazione VLM.
+        "none" per disabilitare. Esempi: "moondream", "minicpm-v", "llava-phi3".
 
-        tracker = build_hybrid_tracker(
+    Example
+    -------
+        tracker = build_tracker(
             yolo_model_path="weights/best.onnx",
+            vlm_model="moondream",
             save_output="output/annotated.mp4",
             alert_log="output/alerts.json",
-            verbose=True,  # stampa detection ogni frame
+            verbose=True,
         )
         tracker.run("test.mp4")
     """
@@ -510,20 +454,21 @@ def build_hybrid_tracker(
 
     yolo = YOLOAnalyzer(model_path=yolo_model_path, conf_threshold=yolo_conf)
 
-    vlm: BaseAnalyzer | None = None
-    if vlm_backend == "paligemma":
-        from .analyzer import PaliGemmaAnalyzer
+    vlm: OllamaVLMValidator | None = None
+    if vlm_model not in ("none", ""):
+        from .vlm_validator import OllamaVLMValidator
 
-        vlm = PaliGemmaAnalyzer(device=vlm_device)
-    elif vlm_backend not in ("none", ""):
-        msg = f"vlm_backend={vlm_backend!r} non riconosciuto. Usa 'paligemma' o 'none'."
-        raise ValueError(msg)
+        vlm = OllamaVLMValidator(model=vlm_model, base_url=vlm_url)
+        if not vlm.is_available():
+            print(f"[WARN] Ollama model '{vlm_model}' non disponibile su {vlm_url}. VLM disabilitato.")
+            print(f"       Installa con: ollama pull {vlm_model}")
+            vlm = None
 
     return VideoSafetyTracker(
         yolo_analyzer=yolo,
         vlm_validator=vlm,
         persistence_frames=persistence_frames,
-        window_frames=window_frames,
+        window_frames=max(window_frames, persistence_frames),
         skip_frames=skip_frames,
         display=display,
         save_output=save_output,
