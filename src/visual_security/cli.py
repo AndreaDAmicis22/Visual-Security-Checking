@@ -9,11 +9,11 @@ Usage examples:
       --source video.mp4 \
       --no-vlm
 
-  # Track with local VLM escalation (moondream2, in-process — no server)
+  # Track with local VLM escalation (SmolVLM, in-process — no server)
   python -m visual_security.cli track \
       --yolo-model weights/best.onnx \
       --source video.mp4 \
-      --vlm-model vikhyatk/moondream2 \
+      --vlm-model HuggingFaceTB/SmolVLM-500M-Instruct \
       --save-output output/annotated.mp4 \
       --alert-log output/alerts.json
 
@@ -84,8 +84,8 @@ def main():
     p_track.add_argument("--source", default="0", help="Video file path or camera index (default: 0)")
     p_track.add_argument(
         "--vlm-model",
-        default="vikhyatk/moondream2",
-        help="HuggingFace VLM id for local escalation (e.g. vikhyatk/moondream2, HuggingFaceTB/SmolVLM-500M-Instruct).",
+        default="HuggingFaceTB/SmolVLM-500M-Instruct",
+        help="HuggingFace VLM id for local escalation (e.g. HuggingFaceTB/SmolVLM-500M-Instruct or -2.2B-Instruct).",
     )
     p_track.add_argument("--no-vlm", action="store_true", help="Disable VLM escalation (YOLO+tracker only)")
     p_track.add_argument("--conf", type=float, default=0.30, help="YOLO confidence threshold")
@@ -100,7 +100,7 @@ def main():
 
     # ── check-vlm ─────────────────────────────────────────────────────────────
     p_vlm = sub.add_parser("check-vlm", help="Check if the local VLM backend is available")
-    p_vlm.add_argument("--model", default="vikhyatk/moondream2", help="Model id to report")
+    p_vlm.add_argument("--model", default="HuggingFaceTB/SmolVLM-500M-Instruct", help="Model id to report")
     p_vlm.set_defaults(func=cmd_check_vlm)
 
     args = parser.parse_args()

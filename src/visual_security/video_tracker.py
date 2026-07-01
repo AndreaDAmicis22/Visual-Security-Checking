@@ -456,7 +456,7 @@ class VideoSafetyTracker:
 # ── Factory ───────────────────────────────────────────────────────────────────
 def build_tracker(
     yolo_model_path: str,
-    vlm_model: str = "vikhyatk/moondream2",
+    vlm_model: str = "HuggingFaceTB/SmolVLM-500M-Instruct",
     persistence_frames: int = 4,
     window_frames: int = 7,
     skip_frames: int = 1,
@@ -473,14 +473,14 @@ def build_tracker(
     ----------
     vlm_model : str
         ID HuggingFace del VLM locale per la validazione (in-process, no server).
-        "none" per disabilitare. Default: "vikhyatk/moondream2" (~2B).
-        Alternativa più leggera: "HuggingFaceTB/SmolVLM-500M-Instruct".
+        "none" per disabilitare. Default: "HuggingFaceTB/SmolVLM-500M-Instruct".
+        Alternativa più accurata: "HuggingFaceTB/SmolVLM-2.2B-Instruct".
 
     Example
     -------
         tracker = build_tracker(
             yolo_model_path="weights/best.onnx",
-            vlm_model="vikhyatk/moondream2",
+            vlm_model="HuggingFaceTB/SmolVLM-500M-Instruct",
             save_output="output/annotated.mp4",
             alert_log="output/alerts.json",
             verbose=True,
@@ -497,7 +497,7 @@ def build_tracker(
 
         if not LocalVLMValidator.is_available():
             print("[WARN] torch/transformers non installati → VLM disabilitato.")
-            print("       Installa con: pip install torch transformers pillow einops accelerate")
+            print("       Installa con: pip install torch transformers pillow")
         else:
             vlm = LocalVLMValidator(model_id=vlm_model)
             print(f"[VLM] backend locale '{vlm_model}' — i pesi vengono scaricati al primo alert.")

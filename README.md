@@ -28,7 +28,7 @@ Real-time PPE (Personal Protective Equipment) tracker for construction sites.
 **YOLO** rileva persone e DPI (Helmet, Vest, Glove, Shoe) in tempo reale.
 Il **PPEChecker** associa spazialmente i DPI a ogni persona tramite overlap.
 Il **VideoViolationTracker** conferma le violazioni solo se persistono per N frame su M (sliding window), eliminando i falsi positivi transitori.
-Il **VLM locale** ([moondream2](https://huggingface.co/vikhyatk/moondream2), ~2B, via `transformers`) valida il crop della persona con domande yes/no — viene chiamato solo sulle violazioni confermate dal tracker (escalation, non ogni frame) e su un **thread in background**, quindi non blocca l'elaborazione dei frame.
+Il **VLM locale** ([SmolVLM-500M](https://huggingface.co/HuggingFaceTB/SmolVLM-500M-Instruct), via `transformers`) valida il crop della persona con domande yes/no — viene chiamato solo sulle violazioni confermate dal tracker (escalation, non ogni frame) e su un **thread in background**, quindi non blocca l'elaborazione dei frame.
 
 ## Setup
 
@@ -37,7 +37,7 @@ Il **VLM locale** ([moondream2](https://huggingface.co/vikhyatk/moondream2), ~2B
 pip install -r requirements.txt
 ```
 
-Nessun server esterno: il VLM gira **in-process**. I pesi di moondream2 (~4GB)
+Nessun server esterno: il VLM gira **in-process**. I pesi di SmolVLM-500M (~1GB)
 vengono scaricati automaticamente da HuggingFace al primo utilizzo.
 
 ## Usage
@@ -49,11 +49,11 @@ python -m visual_security.cli track \
     --source video.mp4 \
     --no-vlm
 
-# Track con escalation VLM locale (default: moondream2)
+# Track con escalation VLM locale (default: SmolVLM-500M)
 python -m visual_security.cli track \
     --yolo-model weights/best.onnx \
     --source video.mp4 \
-    --vlm-model vikhyatk/moondream2 \
+    --vlm-model HuggingFaceTB/SmolVLM-500M-Instruct \
     --save-output output/annotated.mp4 \
     --alert-log output/alerts.json
 
@@ -66,18 +66,19 @@ python -m visual_security.cli track \
 python -m visual_security.cli check-vlm
 ```
 
-## Perché un VLM locale (moondream2)?
+## Perché un VLM locale (SmolVLM)?
 
 - **Generativo**: ragiona sull'immagine e gestisce bene le domande con negazione
   ("è *senza* casco?"), dove i modelli contrastivi (CLIP/DINOv2) sbagliano.
 - **Zero-shot**: nessun dataset etichettato richiesto.
+- **Nativo in `transformers`**: niente `trust_remote_code`, quindi resta compatibile
+  con transformers 5.x (moondream2 invece si rompe con la 5.x).
 - **In-process**: niente server esterno, niente Ollama, niente HTTP/JSON fragile.
-- **Locale e gratuito**: i dati non lasciano la macchina, nessuna API key.
+- **Leggero su CPU**: ~2.5s/query con `do_image_splitting=False` (~99 token immagine
+  invece di ~900). La validazione parte **solo** sulle violazioni già confermate dal
+  tracker ed è eseguita fuori dal loop dei frame.
 
-> Su CPU una query richiede alcuni secondi: per questo il VLM parte **solo** sulle
-> violazioni già confermate dal tracker (con cooldown) ed è eseguito fuori dal loop
-> dei frame. Se serve più velocità su CPU, si può passare a un modello più piccolo
-> senza modifiche al codice: `--vlm-model HuggingFaceTB/SmolVLM-500M-Instruct`.
+> Per più accuratezza (a costo di più tempo su CPU): `--vlm-model HuggingFaceTB/SmolVLM-2.2B-Instruct`.
 
 ## Project Structure
 

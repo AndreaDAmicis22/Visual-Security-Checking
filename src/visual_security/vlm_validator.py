@@ -6,23 +6,27 @@ il crop della persona viene inviato a un piccolo VLM *locale* per una
 seconda opinione (riduce i falsi positivi di una YOLO ancora non
 addestrata in modo definitivo).
 
-Perché moondream2 e non Ollama/CLIP:
+Perché SmolVLM (e non Ollama / CLIP / moondream):
   - È un VLM **generativo** → ragiona sull'immagine e gestisce bene le
     domande con negazione ("è SENZA casco?"), dove CLIP/DINOv2 (similarità
     di embedding) sbagliano.
-  - Gira **in-process** via `transformers` → niente server esterno, niente
-    Ollama, niente HTTP/JSON fragile.
+  - È supportato **nativamente** da `transformers` (niente `trust_remote_code`),
+    quindi resta compatibile con le versioni recenti della libreria — a
+    differenza di moondream2, il cui codice remoto si rompe con transformers 5.x.
+  - Gira **in-process** → niente server esterno, niente Ollama, niente HTTP.
   - Funziona in **zero-shot**: nessun dataset etichettato richiesto.
 
 Modello di default:
-  - vikhyatk/moondream2  (~2B, VQA, CPU-friendly ma lento su CPU)
+  - HuggingFaceTB/SmolVLM-500M-Instruct  (~500M, ~2.5s/query su CPU con
+    image-splitting disattivato)
 
-Alternativa più leggera (cambia solo `model_id`, stessa interfaccia):
-  - HuggingFaceTB/SmolVLM-500M-Instruct  (più veloce su CPU, meno preciso)
+Alternativa più precisa (stessa interfaccia, cambia solo `model_id`):
+  - HuggingFaceTB/SmolVLM-2.2B-Instruct  (più lento su CPU, più accurato)
 
-Nota performance: su CPU una query può richiedere alcuni secondi. Per questo
-la validazione parte SOLO sulle violazioni confermate dal tracker e viene
-eseguita fuori dal loop dei frame (vedi VideoSafetyTracker).
+Nota performance: la validazione parte SOLO sulle violazioni confermate dal
+tracker ed è eseguita fuori dal loop dei frame (vedi VideoSafetyTracker).
+Con `do_image_splitting=False` l'immagine usa ~99 token invece di ~900 →
+query ~8x più veloce su CPU, a parità di risposta per crop piccoli.
 """
 
 from __future__ import annotations
@@ -34,8 +38,8 @@ import cv2 as cv
 if TYPE_CHECKING:
     import numpy as np
 
-# Domanda yes/no per singolo PPE. moondream2 risponde in modo affidabile
-# a domande binarie e diritte come questa.
+# Domanda yes/no per singolo PPE. SmolVLM risponde in modo affidabile a
+# domande binarie dirette come questa (es. "Yes." / "No.").
 _QUESTION_TEMPLATE = "Is the construction worker in this image wearing {item}? Answer only 'yes' or 'no'."
 
 _PPE_NAMES: dict[str, str] = {
@@ -48,34 +52,34 @@ _PPE_NAMES: dict[str, str] = {
 
 class LocalVLMValidator:
     """
-    Valida le violazioni PPE interrogando un piccolo VLM locale (moondream2).
+    Valida le violazioni PPE interrogando un piccolo VLM locale (SmolVLM).
 
     L'inferenza gira in-process tramite ``transformers`` — nessun server
     esterno. Il modello viene caricato in modo pigro alla prima chiamata
-    (il primo caricamento scarica i pesi, ~4GB per moondream2).
+    (il primo caricamento scarica i pesi, ~1GB per SmolVLM-500M).
 
     Parameters
     ----------
     model_id : str
-        ID del modello HuggingFace. Default: "vikhyatk/moondream2".
-        Alternativa leggera: "HuggingFaceTB/SmolVLM-500M-Instruct".
-    revision : str | None
-        Revisione/tag del modello (moondream2 usa tag datati). Ignorata
-        per modelli che non la richiedono.
+        ID del modello HuggingFace. Default: "HuggingFaceTB/SmolVLM-500M-Instruct".
+        Più accurato: "HuggingFaceTB/SmolVLM-2.2B-Instruct".
     device : str | None
         "cuda", "cpu" o None (auto: cuda se disponibile, altrimenti cpu).
+    max_new_tokens : int
+        Token generati per risposta. 8 basta per "yes"/"no".
     """
 
     def __init__(
         self,
-        model_id: str = "vikhyatk/moondream2",
-        revision: str | None = "2025-06-21",
+        model_id: str = "HuggingFaceTB/SmolVLM-500M-Instruct",
         device: str | None = None,
+        max_new_tokens: int = 8,
     ):
         self.model_id = model_id
-        self.revision = revision
         self.device = device
+        self.max_new_tokens = max_new_tokens
         self._model = None
+        self._processor = None
         self._load_error: str | None = None
 
     # ── Availability ──────────────────────────────────────────────────────────
@@ -101,29 +105,24 @@ class LocalVLMValidator:
 
     # ── Lazy model load ─────────────────────────────────────────────────────────
     def _ensure_loaded(self) -> bool:
-        """Carica il modello alla prima chiamata. Ritorna False se fallisce."""
+        """Carica modello + processor alla prima chiamata. False se fallisce."""
         if self._model is not None:
             return True
         if self._load_error is not None:
             return False
         try:
             import torch
-            from transformers import AutoModelForCausalLM
+            from transformers import AutoModelForImageTextToText, AutoProcessor
 
             device = self._resolve_device()
-            # Su CPU float32 è più stabile/veloce di bf16; su GPU bf16.
+            # Su CPU float32; su GPU bfloat16.
             dtype = torch.bfloat16 if device == "cuda" else torch.float32
 
-            kwargs = {"trust_remote_code": True, "torch_dtype": dtype}
-            if self.revision and "moondream" in self.model_id:
-                kwargs["revision"] = self.revision
-
-            model = AutoModelForCausalLM.from_pretrained(self.model_id, **kwargs)
-            model = model.to(device)
-            model.eval()
-            self._model = model
+            self._processor = AutoProcessor.from_pretrained(self.model_id)
+            model = AutoModelForImageTextToText.from_pretrained(self.model_id, dtype=dtype)
+            self._model = model.to(device).eval()
             return True
-        except Exception as e:  # noqa: BLE001 — vogliamo degradare, non crashare la pipeline
+        except Exception as e:  # noqa: BLE001 — degradare, non crashare la pipeline
             self._load_error = f"{type(e).__name__}: {e}"
             return False
 
@@ -135,11 +134,23 @@ class LocalVLMValidator:
         rgb = cv.cvtColor(image_bgr, cv.COLOR_BGR2RGB)
         return Image.fromarray(rgb)
 
-    def _answer(self, encoded_or_image, question: str) -> str:
-        """Interroga il modello. Supporta moondream (.query) come default."""
-        # moondream2 espone .query(image_or_encoded, question) -> {"answer": ...}
-        out = self._model.query(encoded_or_image, question)
-        return (out.get("answer") if isinstance(out, dict) else str(out)).strip()
+    def _answer(self, pil, question: str) -> str:
+        """Interroga SmolVLM con una domanda su una singola immagine."""
+        import torch
+
+        messages = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": question}]}]
+        prompt = self._processor.apply_chat_template(messages, add_generation_prompt=True)
+        # do_image_splitting=False: ~99 token invece di ~900 → ~8x più veloce su CPU.
+        inputs = self._processor(
+            text=prompt, images=[pil], return_tensors="pt", do_image_splitting=False
+        ).to(self._model.device)
+        n_prompt = inputs["input_ids"].shape[1]
+
+        with torch.no_grad():
+            out = self._model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
+
+        decoded = self._processor.batch_decode(out[:, n_prompt:], skip_special_tokens=True)
+        return decoded[0].strip() if decoded else ""
 
     # ── Public API ────────────────────────────────────────────────────────────
     def validate_missing_ppe(
@@ -161,10 +172,8 @@ class LocalVLMValidator:
 
         try:
             pil = self._to_pil(crop)
-            # Codifica l'immagine una volta sola, poi riusa per ogni domanda.
-            image_ref = self._model.encode_image(pil) if hasattr(self._model, "encode_image") else pil
         except Exception as e:  # noqa: BLE001
-            return False, f"[VLM encode error: {e}]"
+            return False, f"[VLM image error: {e}]"
 
         confirmed = False
         responses: list[str] = []
@@ -173,10 +182,10 @@ class LocalVLMValidator:
             item_name = _PPE_NAMES.get(item, item.lower())
             question = _QUESTION_TEMPLATE.format(item=item_name)
             try:
-                answer = self._answer(image_ref, question).lower()
+                answer = self._answer(pil, question).lower()
                 responses.append(f"{item}→'{answer}'")
                 # "no" → il PPE NON è indossato → violazione confermata dal VLM.
-                first_words = answer.replace(",", " ").split()[:3]
+                first_words = answer.replace(",", " ").replace(".", " ").split()[:3]
                 if answer.startswith("no") or "no" in first_words or "not wearing" in answer:
                     confirmed = True
             except Exception as e:  # noqa: BLE001
