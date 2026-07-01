@@ -4,6 +4,14 @@ numpy>=2.0
 onnxruntime>=1.18
 python-dotenv>=1.0
 
+# VLM escalation (local, in-process — no external server)
+torch>=2.2
+torchvision>=0.17
+transformers>=4.44
+pillow>=10.0
+einops>=0.8          # richiesto dal codice remoto di moondream2
+accelerate>=0.30
+
 # YOLO ONNX backend (local package)
 -e git+https://github.com/AndreaDAmicis22/yolo#egg=yolo_yolo_onnx
 

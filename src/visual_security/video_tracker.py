@@ -1,5 +1,5 @@
 """
-Real-Time Video Safety Tracker — pipeline YOLO + PPEChecker + VLM (Ollama).
+Real-Time Video Safety Tracker — pipeline YOLO + PPEChecker + VLM locale.
 
 Architecture:
 
@@ -14,7 +14,7 @@ Architecture:
                                       └───────────┬────────────┘
                                                   │ violazioni confermate
                                       ┌───────────▼────────────┐
-                                      │  Ollama VLM (locale)   │  ← opzionale
+                                      │  VLM locale (in-proc)  │  ← opzionale
                                       │  crop persona + prompt │
                                       └───────────┬────────────┘
                                                   │ FrameAlert
@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import time
 from collections import deque
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -41,7 +42,7 @@ if TYPE_CHECKING:
     import numpy as np
 
     from .analyzer import YOLOAnalyzer
-    from .vlm_validator import OllamaVLMValidator
+    from .vlm_validator import LocalVLMValidator
 
 
 # ── Alert ─────────────────────────────────────────────────────────────────────
@@ -50,7 +51,9 @@ class FrameAlert:
     frame_idx: int
     timestamp_s: float
     person_results: list[PersonPPEResult]
-    vlm_confirmed: bool = False
+    # None = validazione VLM ancora in corso (thread in background);
+    # True/False = esito del VLM; False anche quando il VLM non è configurato.
+    vlm_confirmed: bool | None = False
     vlm_response: str | None = None
 
     @property
@@ -59,7 +62,12 @@ class FrameAlert:
 
     def summary(self) -> str:
         viol = self.violations
-        source = "[YOLO+Tracker+VLM✓]" if self.vlm_confirmed else "[YOLO+Tracker]"
+        if self.vlm_confirmed is None:
+            source = "[YOLO+Tracker | VLM pending]"
+        elif self.vlm_confirmed:
+            source = "[YOLO+Tracker+VLM✓]"
+        else:
+            source = "[YOLO+Tracker]"
         parts = " | ".join(p.summary() for p in viol)
         return f"[t={self.timestamp_s:.1f}s frame={self.frame_idx}] {len(viol)} violazione/i {source}: {parts}"
 
@@ -208,7 +216,7 @@ class VideoSafetyTracker:
     Parameters
     ----------
     yolo_analyzer       YOLOAnalyzer configurato.
-    vlm_validator       OllamaVLMValidator opzionale per validazione crop.
+    vlm_validator       LocalVLMValidator opzionale per validazione crop.
     ppe_checker         PersonPPEChecker (default: set PPE completo).
     persistence_frames  Frame positivi necessari nella window per confermare.
     window_frames       Larghezza sliding window (≥ persistence_frames).
@@ -223,7 +231,7 @@ class VideoSafetyTracker:
     def __init__(
         self,
         yolo_analyzer: YOLOAnalyzer,
-        vlm_validator: OllamaVLMValidator | None = None,
+        vlm_validator: LocalVLMValidator | None = None,
         ppe_checker: PersonPPEChecker | None = None,
         persistence_frames: int = 4,
         window_frames: int = 7,
@@ -250,6 +258,10 @@ class VideoSafetyTracker:
 
         self._vlm_calls = 0
         self._alerts: list[FrameAlert] = []
+        # Il VLM (lento su CPU) gira su un singolo worker fuori dal loop dei
+        # frame, così il video/display non si blocca a ogni alert.
+        self._vlm_executor: ThreadPoolExecutor | None = None
+        self._vlm_futures: list[Future] = []
 
     # ── Entry point ────────────────────────────────────────────────────────────
     def run(self, source: str | int = 0) -> list[FrameAlert]:
@@ -271,6 +283,9 @@ class VideoSafetyTracker:
                 fps_src,
                 (fw, fh),
             )
+
+        if self.vlm is not None:
+            self._vlm_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="vlm")
 
         frame_idx = 0
         last_ppr: list[PersonPPEResult] = []
@@ -309,11 +324,11 @@ class VideoSafetyTracker:
                 # ── Persistence filtering ────────────────────────────────────
                 confirmed = self._vio_tracker.update(last_ppr, fw, fh)
 
-                # ── VLM validation + alert ───────────────────────────────────
+                # ── Alert + VLM validation (async) ───────────────────────────
                 if confirmed:
-                    alert = self._make_alert(frame, frame_idx, cap.get(cv.CAP_PROP_POS_MSEC) / 1000.0, last_ppr, confirmed)
+                    ts = cap.get(cv.CAP_PROP_POS_MSEC) / 1000.0
+                    alert = self._emit_alert(frame, frame_idx, ts, last_ppr, confirmed)
                     self._alerts.append(alert)
-                    print(alert.summary())
                     if self.max_alerts and len(self._alerts) >= self.max_alerts:
                         break
 
@@ -339,38 +354,60 @@ class VideoSafetyTracker:
                 writer.release()
             if self.display:
                 cv.destroyAllWindows()
+            # Attendi le validazioni VLM ancora in corso prima di loggare.
+            if self._vlm_executor is not None:
+                if self._vlm_futures:
+                    print(f"Attendo {sum(not f.done() for f in self._vlm_futures)} validazione/i VLM in corso ...")
+                self._vlm_executor.shutdown(wait=True)
+                self._vlm_executor = None
             if self.alert_log_path:
                 self._save_log()
 
         return self._alerts
 
     # ── VLM ───────────────────────────────────────────────────────────────────
-    def _make_alert(self, frame, frame_idx, ts, all_ppr, confirmed) -> FrameAlert:
+    def _emit_alert(self, frame, frame_idx, ts, all_ppr, confirmed) -> FrameAlert:
+        """
+        Crea subito il FrameAlert. Se il VLM è configurato la validazione parte
+        su un thread in background (stato vlm_confirmed=None finché non finisce),
+        così il loop dei frame non si blocca.
+        """
         alert = FrameAlert(frame_idx=frame_idx, timestamp_s=ts, person_results=all_ppr)
 
-        if self.vlm is None:
+        if self.vlm is None or self._vlm_executor is None:
             alert.vlm_confirmed = False
             alert.vlm_response = "VLM non configurato — decisione da YOLO+tracker"
+            print(alert.summary())
             return alert
 
-        vlm_confirmed_count = 0
-        vlm_resp_parts: list[str] = []
-
+        # Copia i crop ORA: `frame` viene sovrascritto al prossimo giro.
+        crops: list[tuple[PersonPPEResult, np.ndarray]] = []
         for pr in confirmed:
             crop = self._crop(frame, pr, pad_ratio=0.30)
-            if crop is None:
-                vlm_resp_parts.append(f"Person#{pr.person_idx}: [crop non disponibile]")
-                continue
+            if crop is not None:
+                crops.append((pr, crop.copy()))
 
+        alert.vlm_confirmed = None  # pending
+        print(alert.summary())
+        future = self._vlm_executor.submit(self._run_vlm, alert, crops)
+        self._vlm_futures.append(future)
+        return alert
+
+    def _run_vlm(self, alert: FrameAlert, crops: list[tuple[PersonPPEResult, np.ndarray]]) -> None:
+        """Eseguito nel worker VLM: valida i crop e aggiorna l'alert in-place."""
+        confirmed_count = 0
+        parts: list[str] = []
+        for pr, crop in crops:
             ok, resp = self.vlm.validate_missing_ppe(crop, pr.missing_ppe)
             self._vlm_calls += 1
             if ok:
-                vlm_confirmed_count += 1
-            vlm_resp_parts.append(f"Person#{pr.person_idx}: {resp}")
+                confirmed_count += 1
+            parts.append(f"Person#{pr.person_idx}: {resp}")
 
-        alert.vlm_confirmed = vlm_confirmed_count > 0
-        alert.vlm_response = " | ".join(vlm_resp_parts) or None
-        return alert
+        alert.vlm_confirmed = confirmed_count > 0
+        alert.vlm_response = " | ".join(parts) or None
+        verdict = "CONFERMATA" if alert.vlm_confirmed else "scartata (falso positivo?)"
+        print(f"  -> VLM frame {alert.frame_idx}: {verdict} - {alert.vlm_response}")
 
     @staticmethod
     def _crop(frame: np.ndarray, pr: PersonPPEResult, pad_ratio: float = 0.30) -> np.ndarray | None:
@@ -419,8 +456,7 @@ class VideoSafetyTracker:
 # ── Factory ───────────────────────────────────────────────────────────────────
 def build_tracker(
     yolo_model_path: str,
-    vlm_model: str = "none",
-    vlm_url: str = "http://localhost:11434",
+    vlm_model: str = "vikhyatk/moondream2",
     persistence_frames: int = 4,
     window_frames: int = 7,
     skip_frames: int = 1,
@@ -436,14 +472,15 @@ def build_tracker(
     Parameters
     ----------
     vlm_model : str
-        Nome del modello Ollama per la validazione VLM.
-        "none" per disabilitare. Esempi: "moondream", "minicpm-v", "llava-phi3".
+        ID HuggingFace del VLM locale per la validazione (in-process, no server).
+        "none" per disabilitare. Default: "vikhyatk/moondream2" (~2B).
+        Alternativa più leggera: "HuggingFaceTB/SmolVLM-500M-Instruct".
 
     Example
     -------
         tracker = build_tracker(
             yolo_model_path="weights/best.onnx",
-            vlm_model="moondream",
+            vlm_model="vikhyatk/moondream2",
             save_output="output/annotated.mp4",
             alert_log="output/alerts.json",
             verbose=True,
@@ -454,15 +491,16 @@ def build_tracker(
 
     yolo = YOLOAnalyzer(model_path=yolo_model_path, conf_threshold=yolo_conf)
 
-    vlm: OllamaVLMValidator | None = None
+    vlm: LocalVLMValidator | None = None
     if vlm_model not in ("none", ""):
-        from .vlm_validator import OllamaVLMValidator
+        from .vlm_validator import LocalVLMValidator
 
-        vlm = OllamaVLMValidator(model=vlm_model, base_url=vlm_url)
-        if not vlm.is_available():
-            print(f"[WARN] Ollama model '{vlm_model}' non disponibile su {vlm_url}. VLM disabilitato.")
-            print(f"       Installa con: ollama pull {vlm_model}")
-            vlm = None
+        if not LocalVLMValidator.is_available():
+            print("[WARN] torch/transformers non installati → VLM disabilitato.")
+            print("       Installa con: pip install torch transformers pillow einops accelerate")
+        else:
+            vlm = LocalVLMValidator(model_id=vlm_model)
+            print(f"[VLM] backend locale '{vlm_model}' — i pesi vengono scaricati al primo alert.")
 
     return VideoSafetyTracker(
         yolo_analyzer=yolo,

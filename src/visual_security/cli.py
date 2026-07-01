@@ -6,13 +6,14 @@ Usage examples:
   # Track a video file (YOLO only, no VLM)
   python -m visual_security.cli track \
       --yolo-model weights/dataset_1/yolo_nano_640/best.onnx \
-      --source video.mp4
+      --source video.mp4 \
+      --no-vlm
 
-  # Track with VLM escalation (Ollama + moondream)
+  # Track with local VLM escalation (moondream2, in-process — no server)
   python -m visual_security.cli track \
       --yolo-model weights/best.onnx \
       --source video.mp4 \
-      --vlm moondream \
+      --vlm-model vikhyatk/moondream2 \
       --save-output output/annotated.mp4 \
       --alert-log output/alerts.json
 
@@ -21,8 +22,8 @@ Usage examples:
       --yolo-model weights/best.onnx \
       --source 0
 
-  # Check if Ollama VLM is available
-  python -m visual_security.cli check-vlm --model moondream
+  # Check if the VLM backend (torch/transformers) is available
+  python -m visual_security.cli check-vlm
 """
 
 from __future__ import annotations
@@ -31,13 +32,12 @@ import argparse
 
 
 def cmd_track(args):
-    """Real-time video tracking with YOLO + optional VLM escalation."""
+    """Real-time video tracking with YOLO + optional local VLM escalation."""
     from .video_tracker import build_tracker
 
     tracker = build_tracker(
         yolo_model_path=args.yolo_model,
-        vlm_model=args.vlm,
-        vlm_url=args.vlm_url,
+        vlm_model="none" if args.no_vlm else args.vlm_model,
         persistence_frames=args.persistence,
         window_frames=args.window,
         skip_frames=args.skip_frames,
@@ -59,19 +59,16 @@ def cmd_track(args):
 
 
 def cmd_check_vlm(args):
-    """Verify that Ollama is running and the model is available."""
-    from .vlm_validator import OllamaVLMValidator
+    """Verify that the local VLM backend (torch/transformers) is importable."""
+    from .vlm_validator import LocalVLMValidator
 
-    vlm = OllamaVLMValidator(model=args.model, base_url=args.vlm_url)
-
-    if vlm.is_available():
-        print(f"OK: Ollama model '{args.model}' is available at {args.vlm_url}")
+    if LocalVLMValidator.is_available():
+        print("OK: torch + transformers disponibili. Il VLM locale può essere usato.")
+        print(f"    Modello di default: '{args.model}' (scaricato al primo utilizzo).")
     else:
-        print(f"ERROR: model '{args.model}' not found at {args.vlm_url}")
+        print("ERROR: torch/transformers non installati.")
         print("\nSetup:")
-        print("  1. Install Ollama: https://ollama.com/download")
-        print(f"  2. Pull the model: ollama pull {args.model}")
-        print("  3. Ollama starts automatically on http://localhost:11434")
+        print("  pip install torch transformers pillow einops accelerate")
 
 
 def main():
@@ -86,9 +83,11 @@ def main():
     p_track.add_argument("--yolo-model", required=True, help="Path to YOLO ONNX model")
     p_track.add_argument("--source", default="0", help="Video file path or camera index (default: 0)")
     p_track.add_argument(
-        "--vlm", default="none", help="Ollama vision model name (e.g. moondream, minicpm-v, llava-phi3). 'none' to disable."
+        "--vlm-model",
+        default="vikhyatk/moondream2",
+        help="HuggingFace VLM id for local escalation (e.g. vikhyatk/moondream2, HuggingFaceTB/SmolVLM-500M-Instruct).",
     )
-    p_track.add_argument("--vlm-url", default="http://localhost:11434", help="Ollama server URL")
+    p_track.add_argument("--no-vlm", action="store_true", help="Disable VLM escalation (YOLO+tracker only)")
     p_track.add_argument("--conf", type=float, default=0.30, help="YOLO confidence threshold")
     p_track.add_argument("--persistence", type=int, default=4, help="Frames needed in window to confirm violation")
     p_track.add_argument("--window", type=int, default=7, help="Sliding window size")
@@ -100,9 +99,8 @@ def main():
     p_track.set_defaults(func=cmd_track)
 
     # ── check-vlm ─────────────────────────────────────────────────────────────
-    p_vlm = sub.add_parser("check-vlm", help="Check if Ollama VLM is available")
-    p_vlm.add_argument("--model", default="moondream", help="Model name to check")
-    p_vlm.add_argument("--vlm-url", default="http://localhost:11434", help="Ollama server URL")
+    p_vlm = sub.add_parser("check-vlm", help="Check if the local VLM backend is available")
+    p_vlm.add_argument("--model", default="vikhyatk/moondream2", help="Model id to report")
     p_vlm.set_defaults(func=cmd_check_vlm)
 
     args = parser.parse_args()
