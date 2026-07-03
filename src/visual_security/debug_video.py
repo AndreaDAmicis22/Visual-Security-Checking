@@ -1,5 +1,5 @@
 """
-debug_video.py — Diagnostica le raw detection di YOLO su N frame campionati dal video.
+debug_video.py - Diagnostica le raw detection di YOLO su N frame campionati dal video.
 Mostra il formato bbox restituito dal backend, senza scrivere nulla su disco.
 
 Usage:
@@ -35,8 +35,8 @@ def run(video: str, yolo_model: str, conf: float, samples: int) -> None:
     fh = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
 
     print(f"\nVideo : {video}")
-    print(f"Frame : {n_frames}  @  {fps:.1f} fps  |  {fw}×{fh} px")
-    print(f"Modello: {yolo_model}   conf≥{conf}")
+    print(f"Frame : {n_frames}  @  {fps:.1f} fps  |  {fw}x{fh} px")
+    print(f"Modello: {yolo_model}   conf>={conf}")
     print("=" * 70)
 
     step = max(1, n_frames // samples)
@@ -52,7 +52,7 @@ def run(video: str, yolo_model: str, conf: float, samples: int) -> None:
         res = yolo.analyze(frame)
 
         ts = fi / fps
-        print(f"\nFrame {fi:5d}  ({ts:.1f}s)  →  {len(res.detections)} det  [{res.inference_time_ms:.0f} ms]")
+        print(f"\nFrame {fi:5d}  ({ts:.1f}s)  ->  {len(res.detections)} det  [{res.inference_time_ms:.0f} ms]")
 
         if res.error:
             print(f"  [ERRORE] {res.error}")
@@ -69,15 +69,15 @@ def run(video: str, yolo_model: str, conf: float, samples: int) -> None:
             if parsed:
                 bw = parsed[2] - parsed[0]
                 bh = parsed[3] - parsed[1]
-                size_str = f"  size={bw:.0f}×{bh:.0f}px"
+                size_str = f"  size={bw:.0f}x{bh:.0f}px"
 
                 # Avvisi formato
                 if raw and len(raw) == 4 and all(isinstance(v, float) for v in raw):
                     if all(0.0 <= v <= 1.0 for v in raw):
-                        size_str += "  ⚠ NORMALIZZATO (0-1)"
+                        size_str += "  ! NORMALIZZATO (0-1)"
                     raw3, raw2 = raw[2], raw[0]
                     if raw3 < raw2:
-                        size_str += "  ⚠ PROB. CX,CY,W,H"
+                        size_str += "  ! PROB. CX,CY,W,H"
             else:
                 size_str = "  bbox=NON_PARSEABLE"
 
@@ -88,7 +88,7 @@ def run(video: str, yolo_model: str, conf: float, samples: int) -> None:
 
     # ── Suggerimenti ──────────────────────────────────────────────────────────
     print("\nSuggerimento: se tutte le bbox hanno valori 0-1, il backend restituisce")
-    print("coordinate normalizzate → il checker le converte automaticamente.")
+    print("coordinate normalizzate -> il checker le converte automaticamente.")
     print("Se non vedi 'Person' nelle detection, controlla DEFAULT_CLASS_NAMES in analyzer.py.")
     print()
 

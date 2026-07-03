@@ -150,9 +150,9 @@ class PersonPPEResult:
         return len(self.missing_ppe) == 0
 
     def summary(self) -> str:
-        status = "✅ OK" if self.is_compliant else f"⚠️  MANCANTI: {self.missing_ppe}"
+        status = "OK" if self.is_compliant else f"MANCANTI: {self.missing_ppe}"
         return f"Persona#{self.person_idx}(conf={self.person_conf:.2f}) trovati={self.found_ppe} | {status}" + (
-            " [VLM→]" if self.needs_vlm_validation else ""
+            " [VLM->]" if self.needs_vlm_validation else ""
         )
 
 
