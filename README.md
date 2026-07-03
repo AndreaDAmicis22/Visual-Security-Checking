@@ -78,7 +78,7 @@ python -m visual_security.cli check-vlm
   invece di ~900). La validazione parte **solo** sulle violazioni già confermate dal
   tracker ed è eseguita fuori dal loop dei frame.
 
-> Per più accuratezza (a costo di più tempo su CPU): `--vlm-model HuggingFaceTB/SmolVLM-2.2B-Instruct`.
+> Per più accuratezza (a costo di più tempo su CPU): `--vlm-model HuggingFaceTB/SmolVLM2-2.2B-Instruct`.
 
 ## Project Structure
 

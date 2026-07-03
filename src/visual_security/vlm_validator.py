@@ -21,12 +21,18 @@ Modello di default:
     image-splitting disattivato)
 
 Alternativa più precisa (stessa interfaccia, cambia solo `model_id`):
-  - HuggingFaceTB/SmolVLM-2.2B-Instruct  (più lento su CPU, più accurato)
+  - HuggingFaceTB/SmolVLM2-2.2B-Instruct  (più lento su CPU, più accurato, ~9GB di pesi)
 
 Nota performance: la validazione parte SOLO sulle violazioni confermate dal
 tracker ed è eseguita fuori dal loop dei frame (vedi VideoSafetyTracker).
 Con `do_image_splitting=False` l'immagine usa ~99 token invece di ~900 →
 query ~8x più veloce su CPU, a parità di risposta per crop piccoli.
+
+Una domanda per item (non una query multi-item unica): con SmolVLM-500M una
+domanda composta su piu' PPE spesso produce una singola risposta secca
+("Yes."/"No.") che il parsing per posizione puo' assegnare all'item
+sbagliato → falsi negativi (conferma "indossato" quando in realta' manca).
+Su un sistema di sicurezza questo e' peggio del costo di N query separate.
 """
 
 from __future__ import annotations
@@ -40,13 +46,19 @@ if TYPE_CHECKING:
 
 # Domanda yes/no per singolo PPE. SmolVLM risponde in modo affidabile a
 # domande binarie dirette come questa (es. "Yes." / "No.").
+#
+# Glove/Shoe richiedono ESPLICITAMENTE "on both hands/feet": PersonPPEChecker
+# li marca "mancanti" anche quando ne manca solo UNO dei due (REQUIRED_PPE_COUNTS
+# = 2). Una domanda generica ("wearing safety gloves?") e' ambigua sul conteggio
+# — il VLM puo' vedere un guanto solo su una mano e rispondere comunque "yes",
+# scagionando una violazione che invece e' reale (mancanza parziale).
 _QUESTION_TEMPLATE = "Is the construction worker in this image wearing {item}? Answer only 'yes' or 'no'."
 
 _PPE_NAMES: dict[str, str] = {
     "Helmet": "a hard hat / safety helmet",
     "Vest": "a high-visibility safety vest",
-    "Glove": "safety gloves",
-    "Shoe": "safety boots",
+    "Glove": "safety gloves on BOTH hands",
+    "Shoe": "safety boots on BOTH feet",
 }
 
 
@@ -62,7 +74,7 @@ class LocalVLMValidator:
     ----------
     model_id : str
         ID del modello HuggingFace. Default: "HuggingFaceTB/SmolVLM-500M-Instruct".
-        Più accurato: "HuggingFaceTB/SmolVLM-2.2B-Instruct".
+        Più accurato: "HuggingFaceTB/SmolVLM2-2.2B-Instruct".
     device : str | None
         "cuda", "cpu" o None (auto: cuda se disponibile, altrimenti cpu).
     max_new_tokens : int
@@ -81,6 +93,22 @@ class LocalVLMValidator:
         self._model = None
         self._processor = None
         self._load_error: str | None = None
+
+    @property
+    def load_error(self) -> str | None:
+        """Messaggio d'errore dell'ultimo `load()` fallito, se presente."""
+        return self._load_error
+
+    # ── Public loading ────────────────────────────────────────────────────────
+    def load(self) -> bool:
+        """
+        Carica esplicitamente pesi + processor.
+
+        Da chiamare quando si costruisce il tracker (non durante `run()`),
+        cosi' il costo di caricamento (download/lettura pesi da disco) non
+        ricade sulla prima violazione confermata a runtime.
+        """
+        return self._ensure_loaded()
 
     # ── Availability ──────────────────────────────────────────────────────────
     @staticmethod
@@ -134,7 +162,7 @@ class LocalVLMValidator:
         rgb = cv.cvtColor(image_bgr, cv.COLOR_BGR2RGB)
         return Image.fromarray(rgb)
 
-    def _answer(self, pil, question: str) -> str:
+    def _answer(self, pil, question: str, max_new_tokens: int | None = None) -> str:
         """Interroga SmolVLM con una domanda su una singola immagine."""
         import torch
 
@@ -147,7 +175,9 @@ class LocalVLMValidator:
         n_prompt = inputs["input_ids"].shape[1]
 
         with torch.no_grad():
-            out = self._model.generate(**inputs, max_new_tokens=self.max_new_tokens, do_sample=False)
+            out = self._model.generate(
+                **inputs, max_new_tokens=max_new_tokens or self.max_new_tokens, do_sample=False
+            )
 
         decoded = self._processor.batch_decode(out[:, n_prompt:], skip_special_tokens=True)
         return decoded[0].strip() if decoded else ""
@@ -183,12 +213,15 @@ class LocalVLMValidator:
             question = _QUESTION_TEMPLATE.format(item=item_name)
             try:
                 answer = self._answer(pil, question).lower()
-                responses.append(f"{item}→'{answer}'")
+                # Mostra la frase completa (non solo la chiave categoria "Glove"/"Shoe")
+                # cosi' dal log si vede subito che la domanda era su ENTRAMBI gli
+                # elementi ("on BOTH hands/feet"), non su un singolo pezzo isolato.
+                responses.append(f"{item}[{item_name}]->'{answer}'")
                 # "no" → il PPE NON è indossato → violazione confermata dal VLM.
                 first_words = answer.replace(",", " ").replace(".", " ").split()[:3]
                 if answer.startswith("no") or "no" in first_words or "not wearing" in answer:
                     confirmed = True
             except Exception as e:  # noqa: BLE001
-                responses.append(f"{item}→[error: {e}]")
+                responses.append(f"{item}[{item_name}]->[error: {e}]")
 
         return confirmed, " | ".join(responses)

@@ -85,7 +85,7 @@ def main():
     p_track.add_argument(
         "--vlm-model",
         default="HuggingFaceTB/SmolVLM-500M-Instruct",
-        help="HuggingFace VLM id for local escalation (e.g. HuggingFaceTB/SmolVLM-500M-Instruct or -2.2B-Instruct).",
+        help="HuggingFace VLM id for local escalation (e.g. HuggingFaceTB/SmolVLM-500M-Instruct or HuggingFaceTB/SmolVLM2-2.2B-Instruct).",
     )
     p_track.add_argument("--no-vlm", action="store_true", help="Disable VLM escalation (YOLO+tracker only)")
     p_track.add_argument("--conf", type=float, default=0.30, help="YOLO confidence threshold")

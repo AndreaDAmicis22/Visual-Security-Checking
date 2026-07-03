@@ -30,7 +30,7 @@ import json
 import time
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -55,6 +55,9 @@ class FrameAlert:
     # True/False = esito del VLM; False anche quando il VLM non è configurato.
     vlm_confirmed: bool | None = False
     vlm_response: str | None = None
+    # Verdetto VLM per singola persona (person_idx -> confermato/scagionato),
+    # a differenza di vlm_confirmed che e' aggregato sull'intero alert.
+    vlm_person_verdicts: dict[int, bool] = field(default_factory=dict)
 
     @property
     def violations(self) -> list[PersonPPEResult]:
@@ -65,7 +68,7 @@ class FrameAlert:
         if self.vlm_confirmed is None:
             source = "[YOLO+Tracker | VLM pending]"
         elif self.vlm_confirmed:
-            source = "[YOLO+Tracker+VLM✓]"
+            source = "[YOLO+Tracker+VLM OK]"
         else:
             source = "[YOLO+Tracker]"
         parts = " | ".join(p.summary() for p in viol)
@@ -95,6 +98,10 @@ class VideoViolationTracker:
         self.cooldown = cooldown_frames
         self._history: dict[str, deque] = {}
         self._cooldown: dict[str, int] = {}
+
+    def key(self, pr: PersonPPEResult, fw: int, fh: int) -> str:
+        """Chiave pubblica (cella_griglia × PPE_mancanti) — usata anche per cache-are i verdetti VLM."""
+        return self._key(pr, fw, fh)
 
     def _key(self, pr: PersonPPEResult, fw: int, fh: int) -> str:
         if pr.person_bbox:
@@ -151,19 +158,27 @@ _C = {
     "yellow": (20, 190, 230),
     "white": (230, 230, 230),
     "dark": (20, 20, 20),
+    "purple": (180, 60, 180),
 }
 
 
-def _draw_person(img: np.ndarray, pr: PersonPPEResult, confirmed: bool, fill: float) -> None:
+def _draw_person(
+    img: np.ndarray, pr: PersonPPEResult, confirmed: bool, fill: float, vlm_verdict: bool | None = None
+) -> None:
     if pr.person_bbox is None:
         return
     x1, y1, x2, y2 = (int(v) for v in pr.person_bbox)
 
     if pr.is_compliant:
         color, label, thick = _C["green"], "PPE OK", 2
+    elif confirmed and vlm_verdict is False:
+        # Il tracker persiste a segnalarla, ma il VLM ha gia' scagionato la persona.
+        color = _C["purple"]
+        label = f"VLM: PPE presente? {', '.join(pr.missing_ppe)}"
+        thick = 2
     elif confirmed:
         color = _C["red"]
-        label = f"ALERT: {', '.join(pr.missing_ppe)}"
+        label = f"ALERT: {', '.join(pr.missing_ppe)}" + (" [VLM OK]" if vlm_verdict else "")
         thick = 3
     else:
         g = int(190 - fill * 150)
@@ -262,6 +277,11 @@ class VideoSafetyTracker:
         # frame, così il video/display non si blocca a ogni alert.
         self._vlm_executor: ThreadPoolExecutor | None = None
         self._vlm_futures: list[Future] = []
+        # Cache dei verdetti VLM per chiave di violazione (VideoViolationTracker.key),
+        # cosi' i frame SUCCESSIVI alla risposta async possono disegnare il box
+        # gia' corretto (il frame in cui l'alert e' stato emesso e' gia' scritto
+        # su disco/mostrato prima che il VLM risponda, e non e' recuperabile).
+        self._vlm_verdicts: dict[str, bool] = {}
 
     # ── Entry point ────────────────────────────────────────────────────────────
     def run(self, source: str | int = 0) -> list[FrameAlert]:
@@ -317,7 +337,7 @@ class VideoSafetyTracker:
                         last_ppr = self.checker.check(yolo_res.detections, fw, fh)
 
                         if self.verbose:
-                            print(f"\n[frame {frame_idx}] {len(yolo_res.detections)} det → {len(last_ppr)} persone")
+                            print(f"\n[frame {frame_idx}] {len(yolo_res.detections)} det -> {len(last_ppr)} persone")
                             for pr in last_ppr:
                                 print(f"  {pr.summary()}")
 
@@ -336,7 +356,9 @@ class VideoSafetyTracker:
                 confirmed_idxs = {pr.person_idx for pr in confirmed}
                 for pr in last_ppr:
                     fill = self._vio_tracker.fill(pr, fw, fh)
-                    _draw_person(frame, pr, pr.person_idx in confirmed_idxs, fill)
+                    is_confirmed = pr.person_idx in confirmed_idxs
+                    vlm_verdict = self._vlm_verdicts.get(self._vio_tracker.key(pr, fw, fh)) if is_confirmed else None
+                    _draw_person(frame, pr, is_confirmed, fill, vlm_verdict)
 
                 n_pending = sum(1 for pr in last_ppr if not pr.is_compliant and pr.person_idx not in confirmed_idxs)
                 _draw_hud(frame, frame_idx, live_fps, last_ms, len(last_ppr), n_pending, len(self._alerts), self._vlm_calls)
@@ -376,16 +398,19 @@ class VideoSafetyTracker:
 
         if self.vlm is None or self._vlm_executor is None:
             alert.vlm_confirmed = False
-            alert.vlm_response = "VLM non configurato — decisione da YOLO+tracker"
+            alert.vlm_response = "VLM non configurato -> decisione da YOLO+tracker"
             print(alert.summary())
             return alert
 
         # Copia i crop ORA: `frame` viene sovrascritto al prossimo giro.
-        crops: list[tuple[PersonPPEResult, np.ndarray]] = []
+        # Portiamo anche la chiave del tracker, cosi' _run_vlm puo' aggiornare
+        # la cache dei verdetti usata dai frame successivi per il disegno.
+        fh, fw = frame.shape[:2]
+        crops: list[tuple[PersonPPEResult, np.ndarray, str]] = []
         for pr in confirmed:
             crop = self._crop(frame, pr, pad_ratio=0.30)
             if crop is not None:
-                crops.append((pr, crop.copy()))
+                crops.append((pr, crop.copy(), self._vio_tracker.key(pr, fw, fh)))
 
         alert.vlm_confirmed = None  # pending
         print(alert.summary())
@@ -393,13 +418,15 @@ class VideoSafetyTracker:
         self._vlm_futures.append(future)
         return alert
 
-    def _run_vlm(self, alert: FrameAlert, crops: list[tuple[PersonPPEResult, np.ndarray]]) -> None:
+    def _run_vlm(self, alert: FrameAlert, crops: list[tuple[PersonPPEResult, np.ndarray, str]]) -> None:
         """Eseguito nel worker VLM: valida i crop e aggiorna l'alert in-place."""
         confirmed_count = 0
         parts: list[str] = []
-        for pr, crop in crops:
+        for pr, crop, key in crops:
             ok, resp = self.vlm.validate_missing_ppe(crop, pr.missing_ppe)
             self._vlm_calls += 1
+            alert.vlm_person_verdicts[pr.person_idx] = ok
+            self._vlm_verdicts[key] = ok
             if ok:
                 confirmed_count += 1
             parts.append(f"Person#{pr.person_idx}: {resp}")
@@ -442,6 +469,7 @@ class VideoSafetyTracker:
                         "missing_ppe": p.missing_ppe,
                         "found_ppe": p.found_ppe,
                         "bbox": list(p.person_bbox) if p.person_bbox else None,
+                        "vlm_confirmed": a.vlm_person_verdicts.get(p.person_idx),
                     }
                     for p in a.violations
                 ],
@@ -450,7 +478,7 @@ class VideoSafetyTracker:
         ]
         self.alert_log_path.parent.mkdir(parents=True, exist_ok=True)
         self.alert_log_path.write_text(json.dumps(data, indent=2))
-        print(f"Log alert → {self.alert_log_path} ({len(data)} alert)")
+        print(f"Log alert -> {self.alert_log_path} ({len(data)} alert)")
 
 
 # ── Factory ───────────────────────────────────────────────────────────────────
@@ -474,7 +502,7 @@ def build_tracker(
     vlm_model : str
         ID HuggingFace del VLM locale per la validazione (in-process, no server).
         "none" per disabilitare. Default: "HuggingFaceTB/SmolVLM-500M-Instruct".
-        Alternativa più accurata: "HuggingFaceTB/SmolVLM-2.2B-Instruct".
+        Alternativa più accurata: "HuggingFaceTB/SmolVLM2-2.2B-Instruct".
 
     Example
     -------
@@ -496,11 +524,17 @@ def build_tracker(
         from .vlm_validator import LocalVLMValidator
 
         if not LocalVLMValidator.is_available():
-            print("[WARN] torch/transformers non installati → VLM disabilitato.")
+            print("[WARN] torch/transformers non installati -> VLM disabilitato.")
             print("       Installa con: pip install torch transformers pillow")
         else:
-            vlm = LocalVLMValidator(model_id=vlm_model)
-            print(f"[VLM] backend locale '{vlm_model}' — i pesi vengono scaricati al primo alert.")
+            print(f"[VLM] caricamento backend locale '{vlm_model}' ...")
+            t0 = time.perf_counter()
+            candidate = LocalVLMValidator(model_id=vlm_model)
+            if candidate.load():
+                vlm = candidate
+                print(f"[VLM] pronto in {time.perf_counter() - t0:.1f}s.")
+            else:
+                print(f"[WARN] caricamento VLM fallito ({candidate.load_error}) -> VLM disabilitato.")
 
     return VideoSafetyTracker(
         yolo_analyzer=yolo,
