@@ -6,6 +6,7 @@ Pipeline: YOLO (detection) + VLM locale (escalation/validation, in-process).
 
 from .analyzer import AnalysisResult, BaseAnalyzer, Detection, YOLOAnalyzer
 from .person_ppe_checker import PersonPPEChecker, PersonPPEResult
+from .person_tracker import PersonTracker
 from .video_tracker import VideoSafetyTracker, build_tracker
 from .vlm_validator import LocalVLMValidator
 
@@ -16,6 +17,7 @@ __all__ = [
     "LocalVLMValidator",
     "PersonPPEChecker",
     "PersonPPEResult",
+    "PersonTracker",
     "VideoSafetyTracker",
     "YOLOAnalyzer",
     "build_tracker",

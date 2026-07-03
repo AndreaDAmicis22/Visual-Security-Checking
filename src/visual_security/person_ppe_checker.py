@@ -144,6 +144,9 @@ class PersonPPEResult:
     missing_ppe: list[str] = field(default_factory=list)
     associated_ppe: list = field(default_factory=list)
     needs_vlm_validation: bool = False
+    # Identita' persistente assegnata da PersonTracker (None = non tracciata,
+    # es. analisi single-frame in debug_frame.py).
+    track_id: int | None = None
 
     @property
     def is_compliant(self) -> bool:
@@ -151,7 +154,8 @@ class PersonPPEResult:
 
     def summary(self) -> str:
         status = "OK" if self.is_compliant else f"MANCANTI: {self.missing_ppe}"
-        return f"Persona#{self.person_idx}(conf={self.person_conf:.2f}) trovati={self.found_ppe} | {status}" + (
+        tid = f"[T{self.track_id}]" if self.track_id is not None else ""
+        return f"Persona#{self.person_idx}{tid}(conf={self.person_conf:.2f}) trovati={self.found_ppe} | {status}" + (
             " [VLM->]" if self.needs_vlm_validation else ""
         )
 

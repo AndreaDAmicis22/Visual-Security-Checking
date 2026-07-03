@@ -9,6 +9,12 @@ Architecture:
                                       └───────────┬────────────┘
                                                   │ PersonPPEResult list
                                       ┌───────────▼────────────┐
+                                      │  PersonTracker         │
+                                      │  (identita' IoU +      │
+                                      │   memoria PPE)         │
+                                      └───────────┬────────────┘
+                                                  │ track_id + missing smussati
+                                      ┌───────────▼────────────┐
                                       │  VideoViolationTracker │
                                       │  (sliding window)      │
                                       └───────────┬────────────┘
@@ -37,6 +43,7 @@ from typing import TYPE_CHECKING
 import cv2 as cv
 
 from .person_ppe_checker import PersonPPEChecker, PersonPPEResult
+from .person_tracker import PersonTracker
 
 if TYPE_CHECKING:
     import numpy as np
@@ -104,12 +111,17 @@ class VideoViolationTracker:
         return self._key(pr, fw, fh)
 
     def _key(self, pr: PersonPPEResult, fw: int, fh: int) -> str:
+        missing = "|".join(sorted(pr.missing_ppe))
+        # Identita' vera dal PersonTracker: la persona che si muove non cambia
+        # chiave (la cella di griglia resta come fallback per persone non tracciate).
+        if pr.track_id is not None:
+            return f"T{pr.track_id}:{missing}"
         if pr.person_bbox:
             cx = min(int(((pr.person_bbox[0] + pr.person_bbox[2]) / 2) / max(fw, 1) * self.grid), self.grid - 1)
             cy = min(int(((pr.person_bbox[1] + pr.person_bbox[3]) / 2) / max(fh, 1) * self.grid), self.grid - 1)
         else:
             cx, cy = -1, -1
-        return f"{cx}:{cy}:{'|'.join(sorted(pr.missing_ppe))}"
+        return f"{cx}:{cy}:{missing}"
 
     def update(self, person_results: list[PersonPPEResult], fw: int, fh: int) -> list[PersonPPEResult]:
         active: set[str] = set()
@@ -168,22 +180,23 @@ def _draw_person(
     if pr.person_bbox is None:
         return
     x1, y1, x2, y2 = (int(v) for v in pr.person_bbox)
+    tid = f"T{pr.track_id} " if pr.track_id is not None else ""
 
     if pr.is_compliant:
-        color, label, thick = _C["green"], "PPE OK", 2
+        color, label, thick = _C["green"], f"{tid}PPE OK", 2
     elif confirmed and vlm_verdict is False:
         # Il tracker persiste a segnalarla, ma il VLM ha gia' scagionato la persona.
         color = _C["purple"]
-        label = f"VLM: PPE presente? {', '.join(pr.missing_ppe)}"
+        label = f"{tid}VLM: PPE presente? {', '.join(pr.missing_ppe)}"
         thick = 2
     elif confirmed:
         color = _C["red"]
-        label = f"ALERT: {', '.join(pr.missing_ppe)}" + (" [VLM OK]" if vlm_verdict else "")
+        label = f"{tid}ALERT: {', '.join(pr.missing_ppe)}" + (" [VLM OK]" if vlm_verdict else "")
         thick = 3
     else:
         g = int(190 - fill * 150)
         color = (20, g, 230)
-        label = f"[{int(fill * 100)}%] {', '.join(pr.missing_ppe)}"
+        label = f"{tid}[{int(fill * 100)}%] {', '.join(pr.missing_ppe)}"
         thick = 2
 
     cv.rectangle(img, (x1, y1), (x2, y2), color, thick)
@@ -236,6 +249,9 @@ class VideoSafetyTracker:
     persistence_frames  Frame positivi necessari nella window per confermare.
     window_frames       Larghezza sliding window (≥ persistence_frames).
     skip_frames         Esegui YOLO ogni N frame (1 = ogni frame).
+    ppe_memory_frames   Memoria PPE del PersonTracker: un PPE visto negli
+                        ultimi N frame e' considerato ancora presente anche
+                        se YOLO lo perde (occlusione/blur). ~2s a 24fps.
     display             Mostra finestra OpenCV live.
     save_output         Percorso per il video annotato in output.
     alert_log_path      Percorso per il log JSON degli alert.
@@ -251,6 +267,7 @@ class VideoSafetyTracker:
         persistence_frames: int = 4,
         window_frames: int = 7,
         skip_frames: int = 1,
+        ppe_memory_frames: int = 48,
         display: bool = True,
         save_output: str | Path | None = None,
         alert_log_path: str | Path | None = None,
@@ -263,6 +280,11 @@ class VideoSafetyTracker:
         self._vio_tracker = VideoViolationTracker(
             threshold_frames=persistence_frames,
             window=max(window_frames, persistence_frames),
+        )
+        self._person_tracker = PersonTracker(
+            ppe_memory_frames=ppe_memory_frames,
+            required_ppe=self.checker.required_ppe,
+            vlm_trigger_missing=self.checker.vlm_trigger_missing,
         )
         self.skip_frames = max(1, skip_frames)
         self.display = display
@@ -335,6 +357,10 @@ class VideoSafetyTracker:
                             print(f"[frame {frame_idx}] YOLO error: {yolo_res.error}")
                     else:
                         last_ppr = self.checker.check(yolo_res.detections, fw, fh)
+                        # Identita' + memoria PPE: assegna track_id e smussa
+                        # missing_ppe con l'evidenza recente (solo sui frame
+                        # in cui YOLO ha realmente girato).
+                        last_ppr = self._person_tracker.update(last_ppr, frame_idx)
 
                         if self.verbose:
                             print(f"\n[frame {frame_idx}] {len(yolo_res.detections)} det -> {len(last_ppr)} persone")
@@ -466,6 +492,7 @@ class VideoSafetyTracker:
                 "violations": [
                     {
                         "person_idx": p.person_idx,
+                        "track_id": p.track_id,
                         "missing_ppe": p.missing_ppe,
                         "found_ppe": p.found_ppe,
                         "bbox": list(p.person_bbox) if p.person_bbox else None,
@@ -488,6 +515,7 @@ def build_tracker(
     persistence_frames: int = 4,
     window_frames: int = 7,
     skip_frames: int = 1,
+    ppe_memory_frames: int = 48,
     display: bool = True,
     save_output: str | None = None,
     alert_log: str | None = None,
@@ -503,6 +531,10 @@ def build_tracker(
         ID HuggingFace del VLM locale per la validazione (in-process, no server).
         "none" per disabilitare. Default: "HuggingFaceTB/SmolVLM-500M-Instruct".
         Alternativa più accurata: "HuggingFaceTB/SmolVLM2-2.2B-Instruct".
+    ppe_memory_frames : int
+        Memoria PPE del PersonTracker: un PPE visto negli ultimi N frame e'
+        considerato ancora presente anche se YOLO lo perde temporaneamente
+        (utile per Glove/Shoe, piccoli e spesso occlusi). Default 48 (~2s a 24fps).
 
     Example
     -------
@@ -542,6 +574,7 @@ def build_tracker(
         persistence_frames=persistence_frames,
         window_frames=max(window_frames, persistence_frames),
         skip_frames=skip_frames,
+        ppe_memory_frames=ppe_memory_frames,
         display=display,
         save_output=save_output,
         alert_log_path=alert_log,
