@@ -2,8 +2,7 @@
 Visual Security — PPE detection and tracking for construction sites.
 
 Pipeline: detector open-vocabulary Apache 2.0 (Grounding DINO / OmDet-Turbo)
-+ zone vietate + VLM locale (escalation/validation, in-process).
-Nessuna dipendenza Ultralytics/YOLO (AGPL).
++ zone vietate. Nessuna dipendenza Ultralytics/YOLO (AGPL).
 """
 
 from .analyzer import (
@@ -17,7 +16,6 @@ from .analyzer import (
 from .person_ppe_checker import PersonPPEChecker, PersonPPEResult
 from .person_tracker import PersonTracker
 from .video_tracker import VideoSafetyTracker, build_tracker
-from .vlm_validator import LocalVLMValidator
 from .zone_monitor import RestrictedZone, ZoneMonitor, ZoneViolation
 
 __all__ = [
@@ -25,7 +23,6 @@ __all__ = [
     "BaseAnalyzer",
     "Detection",
     "GroundingDinoAnalyzer",
-    "LocalVLMValidator",
     "OmDetTurboAnalyzer",
     "PersonPPEChecker",
     "PersonPPEResult",

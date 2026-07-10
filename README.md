@@ -2,7 +2,7 @@
 
 Real-time PPE (Personal Protective Equipment) tracker + monitoraggio aree vietate per cantieri.
 
-Pipeline: **detector open-vocabulary** (Grounding DINO / OmDet-Turbo, zero-shot) → **PersonPPEChecker** (associazione DPI↔persona) → **PersonTracker** (identità + memoria PPE) → **sliding window** (conferma violazioni persistenti) → **ZoneMonitor** (aree vietate) → **VLM locale** (validazione crop, escalation) → video annotato + log JSON.
+Pipeline: **detector open-vocabulary** (Grounding DINO / OmDet-Turbo, zero-shot) → **PersonPPEChecker** (associazione DPI↔persona) → **PersonTracker** (identità + memoria PPE) → **sliding window** (conferma violazioni persistenti) → **ZoneMonitor** (aree vietate) → video annotato + log JSON.
 
 > Per l'architettura completa, il ruolo di ogni file, i parametri di taratura e le decisioni di design: **[INFO.md](INFO.md)**.
 
@@ -17,11 +17,15 @@ sorgente dell'applicazione. Per questo è stata rimossa completamente.
 |---|---|---|
 | Detection (default, max accuratezza) | [IDEA-Research/grounding-dino-base](https://huggingface.co/IDEA-Research/grounding-dino-base) | Apache 2.0 |
 | Detection (alternativa real-time) | [omlab/omdet-turbo-swin-tiny-hf](https://huggingface.co/omlab/omdet-turbo-swin-tiny-hf) | Apache 2.0 |
-| Validazione VLM (escalation) | [HuggingFaceTB/SmolVLM-500M-Instruct](https://huggingface.co/HuggingFaceTB/SmolVLM-500M-Instruct) | Apache 2.0 |
 
 I detector sono **open-vocabulary**: rilevano le classi da prompt testuali
 ("a person", "a hard hat", "a reflective safety vest", ...) **senza alcun
 training** — niente dataset PPE da trovare/etichettare, niente fine-tuning.
+
+> Nota storica: la pipeline includeva uno stadio di validazione VLM (SmolVLM)
+> nato per compensare una YOLO addestrata male su guanti e scarpe. Con i
+> detector open-vocabulary era diventato ridondante ed è stato rimosso
+> (dimezzando i tempi di runtime).
 
 ## Setup
 
@@ -31,18 +35,17 @@ pip install -r requirements.txt
 ```
 
 Nessun server esterno: tutto gira **in-process**. I pesi dei modelli vengono
-scaricati automaticamente da HuggingFace al primo utilizzo (~1GB il detector,
-~1GB il VLM).
+scaricati automaticamente da HuggingFace al primo utilizzo (~1GB).
 
 ## Usage
 
 ### CLI
 
 ```bash
-# Track a video (detector only, no VLM)
-python -m visual_security.cli track --source video.mp4 --no-vlm
+# Track a video
+python -m visual_security.cli track --source video.mp4
 
-# Track completo: zone vietate + escalation VLM
+# Track completo: zone vietate + output annotato + log
 python -m visual_security.cli track \
     --source video.mp4 \
     --zones zones.example.json \
@@ -53,11 +56,8 @@ python -m visual_security.cli track \
 python -m visual_security.cli track --source 0 --detector omdet-turbo
 
 # Verifica che il backend (torch/transformers) sia disponibile
-python -m visual_security.cli check-vlm
+python -m visual_security.cli check-backend
 ```
-
-Per un VLM più accurato (a costo di più tempo su CPU e ~9GB di pesi):
-`--vlm-model HuggingFaceTB/SmolVLM2-2.2B-Instruct`.
 
 ### Aree vietate
 
@@ -81,9 +81,13 @@ per N frame (stessa sliding window dei PPE). Vedi `zones.example.json`.
 
 ### Notebook
 
-`test_tracker.ipynb` esegue la pipeline completa su un video di test: sampling
-dei frame con detection raw, tracking completo con VLM, analisi visiva degli
-alert e report del log JSON.
+- `test_tracker.ipynb` — esegue la pipeline completa su un video di test: sampling
+  dei frame con detection raw, tracking completo, analisi visiva degli alert e
+  report del log JSON.
+- `benchmark_tracker.ipynb` — **confronto quantitativo** Grounding DINO vs
+  OmDet-Turbo: tracker end-to-end sul video (FPS, stabilità identità, alert),
+  metriche frame-level contro weak ground truth dichiarata, e Precision/Recall/F1
+  su un test split etichettato (Roboflow, valutazione stratificata class-aware).
 
 ### Script di debug
 
@@ -102,5 +106,5 @@ python -m src.visual_security.debug_video --video video.mp4 --detector omdet-tur
 | grounding-dino (default) | ~22s | massima accuratezza; usare `--skip-frames` alto o GPU |
 | omdet-turbo | ~1.5s | qualità comparabile su scene semplici, 15× più veloce |
 
-Su GPU entrambi scendono sotto i 200ms/frame. La validazione VLM (~2.5s/query)
-gira su un thread in background e parte solo sulle violazioni confermate.
+Su GPU entrambi scendono sotto i 200ms/frame. Per numeri aggiornati sul tuo
+hardware esegui `benchmark_tracker.ipynb`.

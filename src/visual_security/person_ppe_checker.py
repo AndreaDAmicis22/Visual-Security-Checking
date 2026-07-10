@@ -143,7 +143,6 @@ class PersonPPEResult:
     found_ppe: dict[str, int] = field(default_factory=dict)
     missing_ppe: list[str] = field(default_factory=list)
     associated_ppe: list = field(default_factory=list)
-    needs_vlm_validation: bool = False
     # Identita' persistente assegnata da PersonTracker (None = non tracciata,
     # es. analisi single-frame in debug_frame.py).
     track_id: int | None = None
@@ -155,9 +154,7 @@ class PersonPPEResult:
     def summary(self) -> str:
         status = "OK" if self.is_compliant else f"MANCANTI: {self.missing_ppe}"
         tid = f"[T{self.track_id}]" if self.track_id is not None else ""
-        return f"Persona#{self.person_idx}{tid}(conf={self.person_conf:.2f}) trovati={self.found_ppe} | {status}" + (
-            " [VLM->]" if self.needs_vlm_validation else ""
-        )
+        return f"Persona#{self.person_idx}{tid}(conf={self.person_conf:.2f}) trovati={self.found_ppe} | {status}"
 
 
 class PersonPPEChecker:
@@ -175,7 +172,7 @@ class PersonPPEChecker:
     iou_threshold : float
         Soglia IoU fallback. Default 0.05.
     no_bbox_policy : str
-        "vlm_only"    → persona senza bbox: tutti i PPE mancanti, VLM obbligatorio
+        "all_missing"  → persona senza bbox: tutti i PPE marcati mancanti (prudente)
         "none_missing" → persona senza bbox: considerata compliant (conservativo)
     """
 
@@ -186,14 +183,12 @@ class PersonPPEChecker:
         required_ppe: dict[str, int] | None = None,
         containment_threshold: float = 0.25,
         iou_threshold: float = 0.05,
-        no_bbox_policy: str = "vlm_only",
-        vlm_trigger_missing: set[str] | None = None,
+        no_bbox_policy: str = "all_missing",
     ):
         self.required_ppe = required_ppe or dict(REQUIRED_PPE_COUNTS)
         self.containment_threshold = containment_threshold
         self.iou_threshold = iou_threshold
         self.no_bbox_policy = no_bbox_policy
-        self.vlm_trigger_missing = vlm_trigger_missing
 
     # ── PPE che tendono a stare FUORI dalla bbox persona ──────────────────────
     # Gloves → mani ai lati (espandi orizzontalmente)
@@ -280,15 +275,9 @@ class PersonPPEChecker:
                 assoc_dets.append(det)
 
             if p_box is None:
-                if self.no_bbox_policy == "vlm_only":
-                    missing, needs_vlm = list(self.required_ppe.keys()), True
-                else:
-                    missing, needs_vlm = [], False
+                missing = list(self.required_ppe.keys()) if self.no_bbox_policy == "all_missing" else []
             else:
                 missing = [cat for cat, req in self.required_ppe.items() if found_counts.get(cat, 0) < req]
-                needs_vlm = (
-                    bool(missing) if self.vlm_trigger_missing is None else bool(set(missing) & self.vlm_trigger_missing)
-                )
 
             results.append(
                 PersonPPEResult(
@@ -299,7 +288,6 @@ class PersonPPEChecker:
                     found_ppe=found_counts,
                     missing_ppe=missing,
                     associated_ppe=assoc_dets,
-                    needs_vlm_validation=needs_vlm,
                 )
             )
 

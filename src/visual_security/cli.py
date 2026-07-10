@@ -3,15 +3,13 @@ CLI for Visual Security — PPE Tracker.
 
 Usage examples:
 
-  # Track a video file (detector only, no VLM)
-  python -m visual_security.cli track \
-      --source video.mp4 \
-      --no-vlm
+  # Track a video file
+  python -m visual_security.cli track --source video.mp4
 
-  # Track with restricted zones + local VLM escalation
+  # Track with restricted zones + annotated output
   python -m visual_security.cli track \
       --source video.mp4 \
-      --zones zones.json \
+      --zones zones.example.json \
       --save-output output/annotated.mp4 \
       --alert-log output/alerts.json
 
@@ -21,7 +19,7 @@ Usage examples:
       --detector omdet-turbo
 
   # Check if the inference backend (torch/transformers) is available
-  python -m visual_security.cli check-vlm
+  python -m visual_security.cli check-backend
 """
 
 from __future__ import annotations
@@ -30,12 +28,11 @@ import argparse
 
 
 def cmd_track(args):
-    """Real-time video tracking: open-vocab detector + zones + optional VLM escalation."""
+    """Real-time video tracking: open-vocab detector + zones."""
     from .video_tracker import build_tracker
 
     tracker = build_tracker(
         detector=args.detector,
-        vlm_model="none" if args.no_vlm else args.vlm_model,
         zones_file=args.zones,
         persistence_frames=args.persistence,
         window_frames=args.window,
@@ -57,23 +54,24 @@ def cmd_track(args):
         print(a.summary())
 
 
-def cmd_check_vlm(args):
+def cmd_check_backend(args):  # noqa: ARG001
     """Verify that the local inference backend (torch/transformers) is importable."""
-    from .vlm_validator import LocalVLMValidator
+    try:
+        import torch
+        import transformers
 
-    if LocalVLMValidator.is_available():
-        print("OK: torch + transformers disponibili. Detector e VLM locali utilizzabili.")
-        print(f"    VLM di default: '{args.model}' (scaricato al primo utilizzo).")
-    else:
-        print("ERROR: torch/transformers non installati.")
+        print(f"OK: torch {torch.__version__} + transformers {transformers.__version__} disponibili.")
+        print("    I pesi dei detector vengono scaricati da HuggingFace al primo utilizzo.")
+    except ImportError as e:
+        print(f"ERROR: backend non disponibile ({e}).")
         print("\nSetup:")
-        print("  pip install torch transformers pillow")
+        print("  pip install torch transformers pillow timm")
 
 
 def main():
     parser = argparse.ArgumentParser(
         prog="visual_security",
-        description="PPE Safety Tracker - detector open-vocabulary (Apache 2.0) + zone vietate + VLM escalation",
+        description="PPE Safety Tracker - detector open-vocabulary (Apache 2.0) + zone vietate",
     )
     sub = parser.add_subparsers(dest="command")
 
@@ -87,12 +85,6 @@ def main():
         help="Open-vocabulary detector: grounding-dino (max accuracy) or omdet-turbo (faster).",
     )
     p_track.add_argument("--zones", help="JSON file with restricted zones (see zone_monitor.py for format)")
-    p_track.add_argument(
-        "--vlm-model",
-        default="HuggingFaceTB/SmolVLM-500M-Instruct",
-        help="HuggingFace VLM id for local escalation (e.g. HuggingFaceTB/SmolVLM-500M-Instruct or HuggingFaceTB/SmolVLM2-2.2B-Instruct).",
-    )
-    p_track.add_argument("--no-vlm", action="store_true", help="Disable VLM escalation (detector+tracker only)")
     p_track.add_argument("--conf", type=float, default=None, help="Detector confidence threshold (default: backend default)")
     p_track.add_argument("--persistence", type=int, default=4, help="Frames needed in window to confirm violation")
     p_track.add_argument("--window", type=int, default=7, help="Sliding window size")
@@ -103,10 +95,9 @@ def main():
     p_track.add_argument("--verbose", action="store_true", help="Print debug info per frame")
     p_track.set_defaults(func=cmd_track)
 
-    # ── check-vlm ─────────────────────────────────────────────────────────────
-    p_vlm = sub.add_parser("check-vlm", help="Check if the local inference backend is available")
-    p_vlm.add_argument("--model", default="HuggingFaceTB/SmolVLM-500M-Instruct", help="Model id to report")
-    p_vlm.set_defaults(func=cmd_check_vlm)
+    # ── check-backend ─────────────────────────────────────────────────────────
+    p_chk = sub.add_parser("check-backend", help="Check if the local inference backend is available")
+    p_chk.set_defaults(func=cmd_check_backend)
 
     args = parser.parse_args()
     if hasattr(args, "func"):

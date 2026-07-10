@@ -8,8 +8,7 @@ Due problemi risolti insieme:
    tracker associa le bbox persona tra frame consecutivi (matching greedy per
    IoU) e assegna un `track_id` stabile, che VideoViolationTracker usa come
    chiave di violazione (al posto della cella di griglia: una persona che
-   cammina non resetta piu' il conteggio di persistenza) e che rende la cache
-   dei verdetti VLM davvero per-persona.
+   cammina non resetta piu' il conteggio di persistenza).
 
 2. Memoria PPE: il detector perde facilmente gli oggetti piccoli (Glove/Shoe) per
    occlusione o motion blur, producendo violazioni intermittenti "fantasma".
@@ -53,9 +52,6 @@ class PersonTracker:
     required_ppe : dict[str, int] | None
         Quantita' richiesta per categoria (default: set completo, come
         PersonPPEChecker).
-    vlm_trigger_missing : set[str] | None
-        Stessa semantica di PersonPPEChecker: quali categorie mancanti
-        fanno scattare la validazione VLM (None = qualunque).
     """
 
     def __init__(
@@ -64,13 +60,11 @@ class PersonTracker:
         max_age_frames: int = 30,
         ppe_memory_frames: int = 48,
         required_ppe: dict[str, int] | None = None,
-        vlm_trigger_missing: set[str] | None = None,
     ):
         self.iou_threshold = iou_threshold
         self.max_age_frames = max_age_frames
         self.ppe_memory_frames = ppe_memory_frames
         self.required_ppe = required_ppe or dict(REQUIRED_PPE_COUNTS)
-        self.vlm_trigger_missing = vlm_trigger_missing
         self._tracks: dict[int, _Track] = {}
         self._next_id = 0
 
@@ -78,10 +72,15 @@ class PersonTracker:
     def active_tracks(self) -> int:
         return len(self._tracks)
 
+    @property
+    def tracks_created(self) -> int:
+        """Totale track_id assegnati dall'inizio (indicatore di stabilita': meno = meglio)."""
+        return self._next_id
+
     def update(self, person_results: list[PersonPPEResult], frame_idx: int) -> list[PersonPPEResult]:
         """
         Associa le persone del frame ai track, aggiorna l'evidenza PPE e
-        riscrive in-place found_ppe/missing_ppe/needs_vlm_validation.
+        riscrive in-place found_ppe/missing_ppe.
         Va chiamato solo sui frame in cui il detector ha realmente girato.
         """
         with_bbox = [pr for pr in person_results if pr.person_bbox is not None]
@@ -138,8 +137,3 @@ class PersonTracker:
         effective = {cat: track.ppe_evidence[cat][0] for cat in self.required_ppe}
         pr.found_ppe = effective
         pr.missing_ppe = [cat for cat, req in self.required_ppe.items() if effective[cat] < req]
-        pr.needs_vlm_validation = (
-            bool(pr.missing_ppe)
-            if self.vlm_trigger_missing is None
-            else bool(set(pr.missing_ppe) & self.vlm_trigger_missing)
-        )

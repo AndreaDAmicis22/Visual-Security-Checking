@@ -24,8 +24,6 @@ i COCO-pretrained conoscono "person" ma NON caschi/gilet/guanti — servirebbe
 fine-tuning su un dataset PPE, che e' esattamente il collo di bottiglia
 storico del progetto. I modelli open-vocabulary rilevano le classi PPE
 direttamente dal prompt testuale, zero-shot.
-
-VLM escalation is handled separately via vlm_validator module.
 """
 
 from __future__ import annotations

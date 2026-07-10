@@ -4,8 +4,8 @@ numpy>=2.0
 python-dotenv>=1.0
 
 # Inference backend (local, in-process — no external server)
-# Detector open-vocabulary (Grounding DINO / OmDet-Turbo) e VLM (SmolVLM)
-# sono tutti nativi in transformers (no trust_remote_code) e Apache 2.0.
+# I detector open-vocabulary (Grounding DINO / OmDet-Turbo) sono nativi in
+# transformers (no trust_remote_code) e Apache 2.0.
 # NESSUNA dipendenza Ultralytics/YOLO (AGPL — incompatibile con codice
 # proprietario in produzione).
 torch>=2.2
