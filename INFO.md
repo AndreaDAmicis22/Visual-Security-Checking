@@ -96,7 +96,8 @@ Poligoni definiti in JSON (coordinate normalizzate 0-1 o pixel). Una persona è 
 | File | Ruolo |
 |---|---|
 | `utils/paths.py` | Path canonici del progetto (`ROOT_DIR`, `DATA_DIR`, ...). |
-| `download_data.py` | Download dataset da Roboflow (API key da `.env`) — serve solo per la **valutazione** (`benchmark_tracker.ipynb`), non per il training (i detector sono zero-shot). |
+| `download_data.py` | Download del dataset Roboflow completo (API key da `.env`) — serve solo per **ricostruire/estendere** `benchmark_data/`; il benchmark usa il set già incluso. |
+| `benchmark_data/` (root) | **Set di valutazione incluso nel progetto**: 500 immagini etichettate (YOLO format), stratificate per classe (Person 150 / Glove 150 / Vest 120 / Helmet 80), CC BY 4.0. Vedi il suo README. |
 
 ### Debug
 | File | Ruolo |
@@ -108,7 +109,7 @@ Poligoni definiti in JSON (coordinate normalizzate 0-1 o pixel). Una persona è 
 | File | Ruolo |
 |---|---|
 | `test_tracker.ipynb` | Test qualitativo della pipeline su un video. |
-| `benchmark_tracker.ipynb` | Confronto quantitativo tra i detector: tracker end-to-end sul video, frame-level vs weak GT, P/R/F1 su test split etichettato (stratificato class-aware). |
+| `benchmark_tracker.ipynb` | Confronto quantitativo tra i detector: tracker end-to-end sul video, frame-level vs weak GT, P/R/F1 su `benchmark_data/` (stratificato class-aware). |
 
 ---
 
@@ -149,4 +150,4 @@ giustifica più il costo (~2.5s/query + ~1GB di pesi + thread dedicato): rimosso
 - **Primo run**: i pesi vengono scaricati da HuggingFace al primo caricamento (~1GB grounding-dino-base, ~800MB omdet-turbo).
 - **omdet-turbo richiede `timm`** (`pip install timm`, già in requirements).
 - **Prompt detection**: per aggiungere/modificare le classi rilevate, editare `DETECTION_PROMPTS` in `analyzer.py` (frasi brevi e concrete funzionano meglio: "a hard hat" > "helmet").
-- **Dataset di valutazione**: il test split Roboflow ha **annotazioni parziali** (merge di più dataset — molte immagini annotano una sola classe, solo 95/4423 annotano Person). Il benchmark usa una valutazione stratificata class-aware; non usarlo per training/valutazioni naive.
+- **Set di valutazione**: `benchmark_data/` (500 immagini, incluso nel repo con eccezione nel `.gitignore`) deriva dal dataset Roboflow "PPE Combined Model", che ha **annotazioni parziali** (merge di più dataset — molte immagini annotano una sola classe). Il benchmark usa una valutazione stratificata class-aware; non usarlo per training/valutazioni naive. Nessuna immagine con scarpe annotate → `Shoe` non valutabile staticamente.

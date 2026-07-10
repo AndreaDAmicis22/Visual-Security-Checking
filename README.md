@@ -87,7 +87,10 @@ per N frame (stessa sliding window dei PPE). Vedi `zones.example.json`.
 - `benchmark_tracker.ipynb` — **confronto quantitativo** Grounding DINO vs
   OmDet-Turbo: tracker end-to-end sul video (FPS, stabilità identità, alert),
   metriche frame-level contro weak ground truth dichiarata, e Precision/Recall/F1
-  su un test split etichettato (Roboflow, valutazione stratificata class-aware).
+  su **`benchmark_data/`** — 500 immagini etichettate incluse nel progetto
+  (subset stratificato del dataset Roboflow "PPE Combined Model", CC BY 4.0,
+  valutazione class-aware per via delle annotazioni parziali — vedi
+  `benchmark_data/README.md`).
 
 ### Script di debug
 

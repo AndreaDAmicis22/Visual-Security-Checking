@@ -226,3 +226,7 @@ yolo/
 *.tmp
 *.swp
 *.bak
+
+# Benchmark dataset (500 img etichettate, CC BY 4.0) - versionato: eccezioni agli ignore globali
+benchmark_data/
+benchmark_data/**
