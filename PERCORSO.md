@@ -145,21 +145,56 @@ dall'architettura (escalation-only + asincrono). La scelta è un compromesso fig
 
 ---
 
+### 2.7 — Il colpo di scena finale: la licenza di Ultralytics (lug 2026)
+
+**Cosa è successo.** A progetto funzionante, un vincolo non tecnico ha imposto la revisione più
+radicale: **Ultralytics (YOLOv8/11) è AGPL-3.0** — mettere il codice in produzione in azienda
+avrebbe obbligato a **pubblicarne il sorgente**. Non solo la libreria: anche i **pesi addestrati**
+con Ultralytics sono derivati AGPL. Tutta la filiera YOLO (training, pesi, inferenza ONNX) andava
+sostituita.
+
+**La svolta: detection open-vocabulary.** Al posto di un detector addestrato, due modelli
+**Apache 2.0** nativi in `transformers` che rilevano le classi **da prompt testuali, zero-shot**:
+
+| Backend | Latenza CPU (misurata) | Ruolo |
+|---|---|---|
+| **Grounding DINO base** (IDEA-Research) | ~22 s/frame | default, massima accuratezza |
+| **OmDet-Turbo swin-tiny** | ~1,5 s/frame (15×) | alternativa real-time, qualità comparabile |
+
+Il paradosso positivo: il vincolo di licenza ha **risolto anche il problema storico del dataset** —
+i detector open-vocabulary non richiedono alcun training ("a person", "a hard hat", "a reflective
+safety vest" bastano come prompt). Niente più dataset da trovare, niente più GPU per il training.
+Sul video di test entrambi rilevano Person/Helmet/Vest in modo consistente dove la vecchia YOLO
+(mal addestrata) era instabile.
+
+**In più: le aree vietate.** Con l'occasione è entrato il secondo requisito di prodotto — rilevare
+operai dentro **zone proibite**. Non serve un modello: poligoni definiti in JSON + test geometrico
+del **punto-piedi** (proiezione a terra della persona) + la stessa logica di persistenza degli
+alert PPE. Modulo `zone_monitor.py`.
+
+**Il prezzo.** La latenza su questa CPU resta il nodo: Grounding DINO a ~22 s/frame è utilizzabile
+solo con `skip_frames` alto o in batch; OmDet-Turbo è il ripiego pratico. Su GPU entrambi scendono
+sotto i 200 ms/frame — la scelta del backend è un flag (`--detector`).
+
+---
+
 ## 3 · Stato attuale
 
-- **Pipeline completa e verificata end-to-end** su video reale: YOLO ONNX → associazione → identità
-  + memoria PPE → sliding window → VLM locale asincrono → video annotato + log JSON.
-- **Zero dipendenze da server esterni**: tutto in-process, tutto in locale.
-- Test reale di riferimento: 16 alert dal tracker, di cui il VLM ha scartato ~5 come probabili
-  falsi positivi (guanti/scarpe che la YOLO non aveva visto ma la persona indossava).
+- **Pipeline completa senza componenti AGPL**: detector open-vocabulary (Apache 2.0, zero-shot)
+  → associazione → identità + memoria PPE → sliding window → **zone vietate** → VLM locale asincrono
+  → video annotato + log JSON.
+- **Zero dipendenze da server esterni**: tutto in-process, tutto in locale, tutto Apache 2.0/BSD/MIT.
+- **Zero training richiesto**: nessun dataset, nessuna GPU per addestrare.
 
 ## 4 · Nodi ancora aperti
 
-1. **YOLO non definitiva** — manca un dataset migliore e una macchina con GPU per il training finale.
-   È la radice di quasi tutti i falsi positivi (Glove/Shoe).
-2. **Latenza VLM** — mitigata, non eliminata; vincolata dall'hardware CPU-only.
-3. **Taratura sensibilità** — memoria PPE + persistenza vanno bilanciate per il caso d'uso reale
-   (sorveglianza continua vs clip brevi).
+1. **Latenza detection su CPU** — grounding-dino ~22 s/frame, omdet-turbo ~1,5 s/frame. Per il
+   real-time vero serve una GPU (entrambi < 200 ms) o un lavoro di ottimizzazione (ONNX export,
+   quantizzazione, risoluzione ridotta).
+2. **Glove/Shoe restano difficili** — oggetti piccoli, anche per i detector zero-shot; la memoria
+   PPE + VLM compensano ma la taratura va rifinita sul campo.
+3. **Taratura sensibilità** — memoria PPE + persistenza + skip_frames vanno bilanciate per il caso
+   d'uso reale (sorveglianza continua vs clip brevi).
 
 ## 5 · Le lezioni
 
@@ -174,3 +209,8 @@ dall'architettura (escalation-only + asincrono). La scelta è un compromesso fig
   è più robusto nel tempo.
 - **La scelta del modello è iterativa**: cinque tentativi prima di SmolVLM. Normale — l'importante è
   che ogni scarto fosse motivato e documentato.
+- **La licenza è un requisito di prodotto, non una nota a piè di pagina.** AGPL su Ultralytics ha
+  invalidato l'intera filiera detection a progetto finito. Verificare le licenze (modello E pesi)
+  *prima* di costruirci sopra.
+- **A volte il vincolo apre la strada migliore**: l'obbligo di abbandonare YOLO ha portato ai
+  detector open-vocabulary, che hanno eliminato d'un colpo il problema del dataset e del training.

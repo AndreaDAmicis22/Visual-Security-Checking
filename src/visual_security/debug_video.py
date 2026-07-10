@@ -1,11 +1,11 @@
 """
-debug_video.py - Diagnostica le raw detection di YOLO su N frame campionati dal video.
+debug_video.py - Diagnostica le raw detection su N frame campionati dal video.
 Mostra il formato bbox restituito dal backend, senza scrivere nulla su disco.
 
 Usage:
     python -m src.visual_security.debug_video \
         --video test.mp4 \
-        --yolo-model weights/dataset_1/yolo_nano_640/best.onnx \
+        --detector grounding-dino \
         --samples 6
 """
 
@@ -15,14 +15,14 @@ import argparse
 import sys
 
 
-def run(video: str, yolo_model: str, conf: float, samples: int) -> None:
+def run(video: str, detector_name: str, conf: float | None, samples: int) -> None:
     import cv2 as cv
 
     sys.path.insert(0, "src")
-    from visual_security.analyzer import YOLOAnalyzer
+    from visual_security.analyzer import build_detector
     from visual_security.person_ppe_checker import _to_xyxy
 
-    yolo = YOLOAnalyzer(model_path=yolo_model, conf_threshold=conf)
+    det = build_detector(detector_name, conf_threshold=conf)
 
     cap = cv.VideoCapture(video)
     if not cap.isOpened():
@@ -36,7 +36,7 @@ def run(video: str, yolo_model: str, conf: float, samples: int) -> None:
 
     print(f"\nVideo : {video}")
     print(f"Frame : {n_frames}  @  {fps:.1f} fps  |  {fw}x{fh} px")
-    print(f"Modello: {yolo_model}   conf>={conf}")
+    print(f"Detector: {detector_name}   conf>={conf if conf is not None else 'default'}")
     print("=" * 70)
 
     step = max(1, n_frames // samples)
@@ -49,7 +49,7 @@ def run(video: str, yolo_model: str, conf: float, samples: int) -> None:
             print(f"\nFrame {fi:5d}: lettura fallita, skip.")
             continue
 
-        res = yolo.analyze(frame)
+        res = det.analyze(frame)
 
         ts = fi / fps
         print(f"\nFrame {fi:5d}  ({ts:.1f}s)  ->  {len(res.detections)} det  [{res.inference_time_ms:.0f} ms]")
@@ -89,18 +89,18 @@ def run(video: str, yolo_model: str, conf: float, samples: int) -> None:
     # ── Suggerimenti ──────────────────────────────────────────────────────────
     print("\nSuggerimento: se tutte le bbox hanno valori 0-1, il backend restituisce")
     print("coordinate normalizzate -> il checker le converte automaticamente.")
-    print("Se non vedi 'Person' nelle detection, controlla DEFAULT_CLASS_NAMES in analyzer.py.")
+    print("Se non vedi 'Person' nelle detection, controlla DETECTION_PROMPTS in analyzer.py.")
     print()
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(description="Diagnostica detection YOLO su frame campionati dal video (no file su disco)")
+    p = argparse.ArgumentParser(description="Diagnostica detection su frame campionati dal video (no file su disco)")
     p.add_argument("--video", required=True, help="Percorso del video")
-    p.add_argument("--yolo-model", required=True, help="Percorso modello ONNX")
-    p.add_argument("--conf", type=float, default=0.25, help="Soglia confidence (default 0.25)")
+    p.add_argument("--detector", default="grounding-dino", choices=["grounding-dino", "omdet-turbo"])
+    p.add_argument("--conf", type=float, default=None, help="Soglia confidence (default: backend default)")
     p.add_argument("--samples", type=int, default=6, help="Numero di frame da campionare")
     args = p.parse_args()
-    run(args.video, args.yolo_model, args.conf, args.samples)
+    run(args.video, args.detector, args.conf, args.samples)
 
 
 if __name__ == "__main__":

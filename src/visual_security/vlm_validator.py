@@ -1,10 +1,10 @@
 """
 VLM Validator — Escalation via a local, in-process vision LLM.
 
-Quando il tracker YOLO+PPEChecker conferma una violazione persistente,
+Quando il tracker detector+PPEChecker conferma una violazione persistente,
 il crop della persona viene inviato a un piccolo VLM *locale* per una
-seconda opinione (riduce i falsi positivi di una YOLO ancora non
-addestrata in modo definitivo).
+seconda opinione (riduce i falsi positivi del detector zero-shot sugli
+oggetti piccoli).
 
 Perché SmolVLM (e non Ollama / CLIP / moondream):
   - È un VLM **generativo** → ragiona sull'immagine e gestisce bene le
@@ -189,7 +189,7 @@ class LocalVLMValidator:
         missing_ppe: list[str],
     ) -> tuple[bool, str]:
         """
-        Chiede al VLM se ogni PPE marcato "mancante" dalla YOLO è davvero assente.
+        Chiede al VLM se ogni PPE marcato "mancante" dal detector è davvero assente.
 
         Returns
         -------

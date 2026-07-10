@@ -1,7 +1,7 @@
 """
 Person-centric PPE Completeness Checker.
 
-Per ogni 'Person' rilevata da YOLO, verifica che i PPE richiesti
+Per ogni 'Person' rilevata dal detector, verifica che i PPE richiesti
 (Helmet, Vest, Glove ×2, Shoe ×2) siano spazialmente associati
 tramite containment overlap con la bounding box della persona.
 """

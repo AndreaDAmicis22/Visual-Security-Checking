@@ -1,52 +1,83 @@
 # Visual Security — PPE Tracker
 
-Real-time PPE (Personal Protective Equipment) tracker for construction sites.
+Real-time PPE (Personal Protective Equipment) tracker + monitoraggio aree vietate per cantieri.
 
-Pipeline: **YOLO** (detection ONNX) → **PersonPPEChecker** (associazione DPI↔persona) → **PersonTracker** (identità + memoria PPE) → **sliding window** (conferma violazioni persistenti) → **VLM locale** (validazione crop, escalation) → video annotato + log JSON.
+Pipeline: **detector open-vocabulary** (Grounding DINO / OmDet-Turbo, zero-shot) → **PersonPPEChecker** (associazione DPI↔persona) → **PersonTracker** (identità + memoria PPE) → **sliding window** (conferma violazioni persistenti) → **ZoneMonitor** (aree vietate) → **VLM locale** (validazione crop, escalation) → video annotato + log JSON.
 
 > Per l'architettura completa, il ruolo di ogni file, i parametri di taratura e le decisioni di design: **[INFO.md](INFO.md)**.
+
+## Licenze — perché niente YOLO/Ultralytics
+
+Tutti i modelli usati sono **Apache 2.0** e girano in-process via `transformers`:
+il codice che li usa **può restare proprietario**. Ultralytics (YOLOv8/11) è
+**AGPL-3.0**: metterla in produzione obbligherebbe a pubblicare il codice
+sorgente dell'applicazione. Per questo è stata rimossa completamente.
+
+| Componente | Modello | Licenza |
+|---|---|---|
+| Detection (default, max accuratezza) | [IDEA-Research/grounding-dino-base](https://huggingface.co/IDEA-Research/grounding-dino-base) | Apache 2.0 |
+| Detection (alternativa real-time) | [omlab/omdet-turbo-swin-tiny-hf](https://huggingface.co/omlab/omdet-turbo-swin-tiny-hf) | Apache 2.0 |
+| Validazione VLM (escalation) | [HuggingFaceTB/SmolVLM-500M-Instruct](https://huggingface.co/HuggingFaceTB/SmolVLM-500M-Instruct) | Apache 2.0 |
+
+I detector sono **open-vocabulary**: rilevano le classi da prompt testuali
+("a person", "a hard hat", "a reflective safety vest", ...) **senza alcun
+training** — niente dataset PPE da trovare/etichettare, niente fine-tuning.
 
 ## Setup
 
 ```bash
-# Installa tutte le dipendenze (incluso il backend VLM: torch + transformers)
+# Installa tutte le dipendenze (torch + transformers + timm)
 pip install -r requirements.txt
 ```
 
-Nessun server esterno: il VLM gira **in-process**. I pesi del modello
-([SmolVLM-500M](https://huggingface.co/HuggingFaceTB/SmolVLM-500M-Instruct), ~1GB)
-vengono scaricati automaticamente da HuggingFace al primo utilizzo.
+Nessun server esterno: tutto gira **in-process**. I pesi dei modelli vengono
+scaricati automaticamente da HuggingFace al primo utilizzo (~1GB il detector,
+~1GB il VLM).
 
 ## Usage
 
 ### CLI
 
 ```bash
-# Track a video (YOLO only, no VLM)
-python -m visual_security.cli track \
-    --yolo-model weights/dataset_1/yolo_nano_640/best.onnx \
-    --source video.mp4 \
-    --no-vlm
+# Track a video (detector only, no VLM)
+python -m visual_security.cli track --source video.mp4 --no-vlm
 
-# Track con escalation VLM locale (default: SmolVLM-500M)
+# Track completo: zone vietate + escalation VLM
 python -m visual_security.cli track \
-    --yolo-model weights/best.onnx \
     --source video.mp4 \
-    --vlm-model HuggingFaceTB/SmolVLM-500M-Instruct \
+    --zones zones.example.json \
     --save-output output/annotated.mp4 \
     --alert-log output/alerts.json
 
-# Webcam
-python -m visual_security.cli track \
-    --yolo-model weights/best.onnx \
-    --source 0
+# Detector veloce (OmDet-Turbo, ~1.5s/frame su CPU vs ~22s di Grounding DINO)
+python -m visual_security.cli track --source 0 --detector omdet-turbo
 
-# Verifica che il backend VLM (torch/transformers) sia disponibile
+# Verifica che il backend (torch/transformers) sia disponibile
 python -m visual_security.cli check-vlm
 ```
 
-Per più accuratezza (a costo di più tempo su CPU e ~9GB di pesi):
+Per un VLM più accurato (a costo di più tempo su CPU e ~9GB di pesi):
 `--vlm-model HuggingFaceTB/SmolVLM2-2.2B-Instruct`.
+
+### Aree vietate
+
+Definisci i poligoni in un file JSON (coordinate normalizzate 0-1 o pixel):
+
+```json
+{
+  "zones": [
+    {
+      "name": "Area gru",
+      "polygon": [[0.05, 0.55], [0.40, 0.55], [0.40, 0.98], [0.05, 0.98]],
+      "normalized": true
+    }
+  ]
+}
+```
+
+Una persona è "in zona" se il suo **punto-piedi** (centro del lato inferiore
+della bbox) cade nel poligono; l'alert scatta solo se la presenza **persiste**
+per N frame (stessa sliding window dei PPE). Vedi `zones.example.json`.
 
 ### Notebook
 
@@ -58,18 +89,18 @@ alert e report del log JSON.
 
 ```bash
 # Diagnostica su singola immagine (detection + associazioni DPI, salva immagine annotata)
-python -m src.visual_security.debug_frame --image frame.jpg --yolo-model weights/best.onnx
+python -m src.visual_security.debug_frame --image frame.jpg --detector grounding-dino
 
 # Diagnostica detection raw su N frame campionati dal video
-python -m src.visual_security.debug_video --video video.mp4 --yolo-model weights/best.onnx --samples 6
+python -m src.visual_security.debug_video --video video.mp4 --detector omdet-turbo --samples 6
 ```
 
-### Training
+## Performance (CPU-only, Intel Iris Xe, 16GB)
 
-```bash
-# Scarica il dataset da Roboflow (richiede ROBOFLOW_API_KEY in .env)
-python -m src.visual_security.download_data
+| Backend | Latenza/frame | Note |
+|---|---|---|
+| grounding-dino (default) | ~22s | massima accuratezza; usare `--skip-frames` alto o GPU |
+| omdet-turbo | ~1.5s | qualità comparabile su scene semplici, 15× più veloce |
 
-# Addestra YOLO11 ed esporta in ONNX
-python -m src.visual_security.training
-```
+Su GPU entrambi scendono sotto i 200ms/frame. La validazione VLM (~2.5s/query)
+gira su un thread in background e parte solo sulle violazioni confermate.

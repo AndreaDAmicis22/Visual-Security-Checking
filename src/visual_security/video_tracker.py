@@ -1,12 +1,12 @@
 """
-Real-Time Video Safety Tracker — pipeline YOLO + PPEChecker + VLM locale.
+Real-Time Video Safety Tracker — pipeline detector open-vocabulary + PPEChecker + VLM locale.
 
 Architecture:
 
   ┌────────────────┐  ogni N frame    ┌────────────────────────┐
-  │  YOLO (veloce) │ ─ detections ──► │  PersonPPEChecker      │
-  └────────────────┘                  │  (containment overlap) │
-                                      └───────────┬────────────┘
+  │  Detector OV   │ ─ detections ──► │  PersonPPEChecker      │
+  │ (GroundingDINO)│                  │  (containment overlap) │
+  └────────────────┘                  └───────────┬────────────┘
                                                   │ PersonPPEResult list
                                       ┌───────────▼────────────┐
                                       │  PersonTracker         │
@@ -14,11 +14,11 @@ Architecture:
                                       │   memoria PPE)         │
                                       └───────────┬────────────┘
                                                   │ track_id + missing smussati
-                                      ┌───────────▼────────────┐
-                                      │  VideoViolationTracker │
-                                      │  (sliding window)      │
-                                      └───────────┬────────────┘
-                                                  │ violazioni confermate
+                    ┌─────────────┐   ┌───────────▼────────────┐
+                    │ ZoneMonitor │──►│  VideoViolationTracker │
+                    │(aree vietate│   │  (sliding window)      │
+                    │ punto-piedi)│   └───────────┬────────────┘
+                    └─────────────┘               │ violazioni confermate (PPE + zone)
                                       ┌───────────▼────────────┐
                                       │  VLM locale (in-proc)  │  ← opzionale
                                       │  crop persona + prompt │
@@ -48,8 +48,9 @@ from .person_tracker import PersonTracker
 if TYPE_CHECKING:
     import numpy as np
 
-    from .analyzer import YOLOAnalyzer
+    from .analyzer import BaseAnalyzer
     from .vlm_validator import LocalVLMValidator
+    from .zone_monitor import ZoneMonitor, ZoneViolation
 
 
 # ── Alert ─────────────────────────────────────────────────────────────────────
@@ -65,6 +66,10 @@ class FrameAlert:
     # Verdetto VLM per singola persona (person_idx -> confermato/scagionato),
     # a differenza di vlm_confirmed che e' aggregato sull'intero alert.
     vlm_person_verdicts: dict[int, bool] = field(default_factory=dict)
+    # Violazioni di zona vietata confermate in questo frame (persone dentro
+    # poligoni proibiti). Indipendenti dai PPE: un alert puo' nascere anche
+    # solo da queste.
+    zone_violations: list[ZoneViolation] = field(default_factory=list)
 
     @property
     def violations(self) -> list[PersonPPEResult]:
@@ -73,13 +78,16 @@ class FrameAlert:
     def summary(self) -> str:
         viol = self.violations
         if self.vlm_confirmed is None:
-            source = "[YOLO+Tracker | VLM pending]"
+            source = "[Detector+Tracker | VLM pending]"
         elif self.vlm_confirmed:
-            source = "[YOLO+Tracker+VLM OK]"
+            source = "[Detector+Tracker+VLM OK]"
         else:
-            source = "[YOLO+Tracker]"
+            source = "[Detector+Tracker]"
         parts = " | ".join(p.summary() for p in viol)
-        return f"[t={self.timestamp_s:.1f}s frame={self.frame_idx}] {len(viol)} violazione/i {source}: {parts}"
+        zones = " | ".join(zv.summary() for zv in self.zone_violations)
+        body = " || ".join(s for s in (parts, zones) if s)
+        n = len(viol) + len(self.zone_violations)
+        return f"[t={self.timestamp_s:.1f}s frame={self.frame_idx}] {n} violazione/i {source}: {body}"
 
 
 # ── Persistence tracker ───────────────────────────────────────────────────────
@@ -228,7 +236,7 @@ def _draw_hud(
     for i, line in enumerate(
         [
             f"Frame {frame_idx:>6}    FPS {fps:>5.1f}",
-            f"YOLO  {yolo_ms:>7.1f} ms",
+            f"DET   {yolo_ms:>7.1f} ms",
             f"Persone {n_persons:>3}   In attesa {n_pending:>3}",
             f"Alert   {n_alerts:>3}   VLM calls {vlm_calls:>4}",
         ]
@@ -243,15 +251,16 @@ class VideoSafetyTracker:
 
     Parameters
     ----------
-    yolo_analyzer       YOLOAnalyzer configurato.
+    detector            Detector open-vocabulary (BaseAnalyzer) configurato.
     vlm_validator       LocalVLMValidator opzionale per validazione crop.
     ppe_checker         PersonPPEChecker (default: set PPE completo).
+    zone_monitor        ZoneMonitor opzionale per le aree vietate.
     persistence_frames  Frame positivi necessari nella window per confermare.
     window_frames       Larghezza sliding window (≥ persistence_frames).
-    skip_frames         Esegui YOLO ogni N frame (1 = ogni frame).
+    skip_frames         Esegui il detector ogni N frame (1 = ogni frame).
     ppe_memory_frames   Memoria PPE del PersonTracker: un PPE visto negli
                         ultimi N frame e' considerato ancora presente anche
-                        se YOLO lo perde (occlusione/blur). ~2s a 24fps.
+                        se il detector lo perde (occlusione/blur). ~2s a 24fps.
     display             Mostra finestra OpenCV live.
     save_output         Percorso per il video annotato in output.
     alert_log_path      Percorso per il log JSON degli alert.
@@ -261,9 +270,10 @@ class VideoSafetyTracker:
 
     def __init__(
         self,
-        yolo_analyzer: YOLOAnalyzer,
+        detector: BaseAnalyzer,
         vlm_validator: LocalVLMValidator | None = None,
         ppe_checker: PersonPPEChecker | None = None,
+        zone_monitor: ZoneMonitor | None = None,
         persistence_frames: int = 4,
         window_frames: int = 7,
         skip_frames: int = 1,
@@ -274,8 +284,9 @@ class VideoSafetyTracker:
         max_alerts: int = 0,
         verbose: bool = False,
     ):
-        self.yolo = yolo_analyzer
+        self.detector = detector
         self.vlm = vlm_validator
+        self.zones = zone_monitor
         self.checker = ppe_checker or PersonPPEChecker()
         self._vio_tracker = VideoViolationTracker(
             threshold_frames=persistence_frames,
@@ -347,38 +358,51 @@ class VideoSafetyTracker:
                 t_last = t_now
                 live_fps = sum(fps_buf) / len(fps_buf)
 
-                # ── YOLO + PPE check ─────────────────────────────────────────
+                # ── Detection + PPE check ────────────────────────────────────
+                zone_viol: list[ZoneViolation] = []
                 if (frame_idx - 1) % self.skip_frames == 0:
-                    yolo_res = self.yolo.analyze(frame)
-                    last_ms = yolo_res.inference_time_ms
+                    det_res = self.detector.analyze(frame)
+                    last_ms = det_res.inference_time_ms
 
-                    if yolo_res.error:
+                    if det_res.error:
                         if self.verbose:
-                            print(f"[frame {frame_idx}] YOLO error: {yolo_res.error}")
+                            print(f"[frame {frame_idx}] detector error: {det_res.error}")
                     else:
-                        last_ppr = self.checker.check(yolo_res.detections, fw, fh)
+                        last_ppr = self.checker.check(det_res.detections, fw, fh)
                         # Identita' + memoria PPE: assegna track_id e smussa
                         # missing_ppe con l'evidenza recente (solo sui frame
-                        # in cui YOLO ha realmente girato).
+                        # in cui il detector ha realmente girato).
                         last_ppr = self._person_tracker.update(last_ppr, frame_idx)
 
                         if self.verbose:
-                            print(f"\n[frame {frame_idx}] {len(yolo_res.detections)} det -> {len(last_ppr)} persone")
+                            print(f"\n[frame {frame_idx}] {len(det_res.detections)} det -> {len(last_ppr)} persone")
                             for pr in last_ppr:
                                 print(f"  {pr.summary()}")
 
+                    # ── Zone vietate (solo sui frame con detection fresca) ────
+                    if self.zones is not None:
+                        zone_viol = self.zones.check(last_ppr, fw, fh)
+
                 # ── Persistence filtering ────────────────────────────────────
                 confirmed = self._vio_tracker.update(last_ppr, fw, fh)
+                zone_confirmed = [zv for zv in zone_viol if zv.confirmed]
 
                 # ── Alert + VLM validation (async) ───────────────────────────
-                if confirmed:
+                if confirmed or zone_confirmed:
                     ts = cap.get(cv.CAP_PROP_POS_MSEC) / 1000.0
-                    alert = self._emit_alert(frame, frame_idx, ts, last_ppr, confirmed)
+                    alert = self._emit_alert(frame, frame_idx, ts, last_ppr, confirmed, zone_confirmed)
                     self._alerts.append(alert)
                     if self.max_alerts and len(self._alerts) >= self.max_alerts:
                         break
 
                 # ── Annotazione ──────────────────────────────────────────────
+                if self.zones is not None:
+                    active_zones = {zv.zone_name for zv in zone_viol}
+                    self.zones.draw(frame, active_zones)
+                    for zv in zone_viol:
+                        color = _C["red"] if zv.confirmed else _C["yellow"]
+                        cv.circle(frame, zv.foot_point, 6, color, -1, cv.LINE_AA)
+
                 confirmed_idxs = {pr.person_idx for pr in confirmed}
                 for pr in last_ppr:
                     fill = self._vio_tracker.fill(pr, fw, fh)
@@ -414,17 +438,26 @@ class VideoSafetyTracker:
         return self._alerts
 
     # ── VLM ───────────────────────────────────────────────────────────────────
-    def _emit_alert(self, frame, frame_idx, ts, all_ppr, confirmed) -> FrameAlert:
+    def _emit_alert(self, frame, frame_idx, ts, all_ppr, confirmed, zone_confirmed=None) -> FrameAlert:
         """
         Crea subito il FrameAlert. Se il VLM è configurato la validazione parte
         su un thread in background (stato vlm_confirmed=None finché non finisce),
         così il loop dei frame non si blocca.
-        """
-        alert = FrameAlert(frame_idx=frame_idx, timestamp_s=ts, person_results=all_ppr)
 
-        if self.vlm is None or self._vlm_executor is None:
+        Le violazioni zona non passano dal VLM: l'appartenenza a un poligono
+        e' geometria certa, non serve una seconda opinione.
+        """
+        alert = FrameAlert(
+            frame_idx=frame_idx,
+            timestamp_s=ts,
+            person_results=all_ppr,
+            zone_violations=list(zone_confirmed or []),
+        )
+
+        if self.vlm is None or self._vlm_executor is None or not confirmed:
             alert.vlm_confirmed = False
-            alert.vlm_response = "VLM non configurato -> decisione da YOLO+tracker"
+            if self.vlm is None:
+                alert.vlm_response = "VLM non configurato -> decisione da detector+tracker"
             print(alert.summary())
             return alert
 
@@ -500,6 +533,16 @@ class VideoSafetyTracker:
                     }
                     for p in a.violations
                 ],
+                "zone_violations": [
+                    {
+                        "zone": zv.zone_name,
+                        "person_idx": zv.person_idx,
+                        "track_id": zv.track_id,
+                        "foot_point": list(zv.foot_point),
+                        "bbox": list(zv.person_bbox) if zv.person_bbox else None,
+                    }
+                    for zv in a.zone_violations
+                ],
             }
             for a in self._alerts
         ]
@@ -510,8 +553,9 @@ class VideoSafetyTracker:
 
 # ── Factory ───────────────────────────────────────────────────────────────────
 def build_tracker(
-    yolo_model_path: str,
+    detector: str = "grounding-dino",
     vlm_model: str = "HuggingFaceTB/SmolVLM-500M-Instruct",
+    zones_file: str | None = None,
     persistence_frames: int = 4,
     window_frames: int = 7,
     skip_frames: int = 1,
@@ -519,7 +563,7 @@ def build_tracker(
     display: bool = True,
     save_output: str | None = None,
     alert_log: str | None = None,
-    yolo_conf: float = 0.30,
+    detector_conf: float | None = None,
     verbose: bool = False,
 ) -> VideoSafetyTracker:
     """
@@ -527,29 +571,49 @@ def build_tracker(
 
     Parameters
     ----------
+    detector : str
+        Backend di detection open-vocabulary (Apache 2.0, no Ultralytics):
+        "grounding-dino" (default, massima accuratezza zero-shot) o
+        "omdet-turbo" (real-time, piu' veloce).
     vlm_model : str
         ID HuggingFace del VLM locale per la validazione (in-process, no server).
         "none" per disabilitare. Default: "HuggingFaceTB/SmolVLM-500M-Instruct".
         Alternativa più accurata: "HuggingFaceTB/SmolVLM2-2.2B-Instruct".
+    zones_file : str | None
+        Percorso di un JSON con le aree vietate (vedi zone_monitor.py per il
+        formato). None = monitoraggio zone disattivato.
     ppe_memory_frames : int
         Memoria PPE del PersonTracker: un PPE visto negli ultimi N frame e'
-        considerato ancora presente anche se YOLO lo perde temporaneamente
+        considerato ancora presente anche se il detector lo perde temporaneamente
         (utile per Glove/Shoe, piccoli e spesso occlusi). Default 48 (~2s a 24fps).
 
     Example
     -------
         tracker = build_tracker(
-            yolo_model_path="weights/best.onnx",
+            detector="grounding-dino",
             vlm_model="HuggingFaceTB/SmolVLM-500M-Instruct",
+            zones_file="zones.json",
             save_output="output/annotated.mp4",
             alert_log="output/alerts.json",
             verbose=True,
         )
         tracker.run("test.mp4")
     """
-    from .analyzer import YOLOAnalyzer
+    from .analyzer import build_detector
 
-    yolo = YOLOAnalyzer(model_path=yolo_model_path, conf_threshold=yolo_conf)
+    det = build_detector(detector, conf_threshold=detector_conf)
+    print(f"[Detector] backend '{detector}' ({det.model_id}) — Apache 2.0, zero-shot.")
+
+    zones = None
+    if zones_file:
+        from .zone_monitor import ZoneMonitor
+
+        zones = ZoneMonitor.from_json(
+            zones_file,
+            persistence_frames=persistence_frames,
+            window_frames=max(window_frames, persistence_frames),
+        )
+        print(f"[Zone] {len(zones.zones)} area/e vietata/e da {zones_file}: {[z.name for z in zones.zones]}")
 
     vlm: LocalVLMValidator | None = None
     if vlm_model not in ("none", ""):
@@ -569,8 +633,9 @@ def build_tracker(
                 print(f"[WARN] caricamento VLM fallito ({candidate.load_error}) -> VLM disabilitato.")
 
     return VideoSafetyTracker(
-        yolo_analyzer=yolo,
+        detector=det,
         vlm_validator=vlm,
+        zone_monitor=zones,
         persistence_frames=persistence_frames,
         window_frames=max(window_frames, persistence_frames),
         skip_frames=skip_frames,

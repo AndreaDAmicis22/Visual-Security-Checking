@@ -11,7 +11,7 @@ Due problemi risolti insieme:
    cammina non resetta piu' il conteggio di persistenza) e che rende la cache
    dei verdetti VLM davvero per-persona.
 
-2. Memoria PPE: YOLO perde facilmente gli oggetti piccoli (Glove/Shoe) per
+2. Memoria PPE: il detector perde facilmente gli oggetti piccoli (Glove/Shoe) per
    occlusione o motion blur, producendo violazioni intermittenti "fantasma".
    Per ogni track viene ricordato il conteggio PPE osservato di recente: un
    PPE visto negli ultimi `ppe_memory_frames` frame e' considerato ancora
@@ -82,7 +82,7 @@ class PersonTracker:
         """
         Associa le persone del frame ai track, aggiorna l'evidenza PPE e
         riscrive in-place found_ppe/missing_ppe/needs_vlm_validation.
-        Va chiamato solo sui frame in cui YOLO ha realmente girato.
+        Va chiamato solo sui frame in cui il detector ha realmente girato.
         """
         with_bbox = [pr for pr in person_results if pr.person_bbox is not None]
 
