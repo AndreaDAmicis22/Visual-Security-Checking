@@ -109,6 +109,44 @@ class Detection:
     is_violation: bool = field(default=False)
 
 
+def _box_iou(a: list[float] | None, b: list[float] | None) -> float:
+    """IoU tra due bbox [x1,y1,x2,y2]. 0 se una manca."""
+    if a is None or b is None:
+        return 0.0
+    ix1, iy1 = max(a[0], b[0]), max(a[1], b[1])
+    ix2, iy2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0.0, ix2 - ix1) * max(0.0, iy2 - iy1)
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, a[2] - a[0]) * max(0.0, a[3] - a[1])
+    area_b = max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def nms_per_class(detections: list[Detection], iou_thr: float = 0.5) -> list[Detection]:
+    """
+    Non-Maximum Suppression **per-classe**: rimuove i box duplicati/sovrapposti
+    della STESSA classe (IoU > iou_thr), tenendo quello a confidence maggiore.
+    I detector open-vocabulary tendono a emettere più box sullo stesso oggetto;
+    senza NMS questo produce conteggi gonfiati (es. "Shoe 6") e falsi positivi.
+    Classi diverse non si sopprimono (una persona e il suo casco si sovrappongono
+    ma sono entrambi validi).
+    """
+    from collections import defaultdict
+
+    by_label: dict[str, list[Detection]] = defaultdict(list)
+    for d in detections:
+        by_label[d.label].append(d)
+
+    kept: list[Detection] = []
+    for group in by_label.values():
+        for d in sorted(group, key=lambda x: -x.confidence):
+            if all(_box_iou(d.bbox, k.bbox) <= iou_thr for k in kept if k.label == d.label):
+                kept.append(d)
+    return kept
+
+
 @dataclass
 class AnalysisResult:
     model_name: str
@@ -182,12 +220,15 @@ class _OpenVocabAnalyzer(BaseAnalyzer):
         prompts: dict[str, str] | None = None,
         device: str | None = None,
         class_conf: dict[str, float] | None = None,
+        nms_iou: float = 0.5,
     ):
         super().__init__(model_name)
         self.model_id = model_id
         self.conf_threshold = conf_threshold
         self.prompts = prompts or dict(DETECTION_PROMPTS)
         self.class_conf = class_conf if class_conf is not None else dict(DETECTION_CONF)
+        # IoU per la NMS per-classe applicata a fine inferenza. None/<=0 = disattivata.
+        self.nms_iou = nms_iou
         self.device = device
         self._model = None
         self._processor = None
@@ -273,7 +314,7 @@ class GroundingDinoAnalyzer(_OpenVocabAnalyzer):
             detections.append(
                 Detection(label=label, confidence=float(score), bbox=[float(v) for v in box.tolist()])
             )
-        return detections
+        return nms_per_class(detections, self.nms_iou) if self.nms_iou and self.nms_iou > 0 else detections
 
 
 class OmDetTurboAnalyzer(_OpenVocabAnalyzer):
@@ -343,7 +384,7 @@ class OmDetTurboAnalyzer(_OpenVocabAnalyzer):
             detections.append(
                 Detection(label=label, confidence=float(score), bbox=[float(v) for v in box.tolist()])
             )
-        return detections
+        return nms_per_class(detections, self.nms_iou) if self.nms_iou and self.nms_iou > 0 else detections
 
 
 # ---------------------------------------------------------------------------
