@@ -62,6 +62,21 @@ DETECTION_PROMPTS: dict[str, str] = {
     "a cigarette": "Cigarette",
 }
 
+# Soglie di confidence PER-CLASSE (floor minimo per accettare una detection).
+# Le classi non elencate usano la soglia base del detector (`conf_threshold`).
+# Motivazione: occhiali e sigarette sono classi piccole/difficili per i detector
+# open-vocabulary e generano falsi positivi a bassa confidence. Misurato su
+# ppe_video.mp4: i FP di Glasses hanno tetto ~0.42 (GD) / ~0.29 (OmDet) -> soglia
+# 0.45 li azzera. I FP di Cigarette arrivano fino a ~0.49 su GD (outlier isolato)
+# -> soglia 0.50. Entrambe restano ben sotto le classi reali (Person/Helmet/Vest
+# fino a 0.8-0.9), quindi il filtro e' selettivo.
+# NB: valori tarati su QUESTO video (dove occhiali/sigarette non esistono davvero);
+# se in un video reale servisse rilevare occhiali/sigarette veri, abbassare qui.
+DETECTION_CONF: dict[str, float] = {
+    "Glasses": 0.45,
+    "Cigarette": 0.50,
+}
+
 # Parole chiave per riportare il testo matchato dal modello alla categoria
 # canonica (Grounding DINO puo' restituire sotto-frasi del prompt).
 _KEYWORD_TO_LABEL: list[tuple[str, str]] = [
@@ -166,14 +181,20 @@ class _OpenVocabAnalyzer(BaseAnalyzer):
         conf_threshold: float,
         prompts: dict[str, str] | None = None,
         device: str | None = None,
+        class_conf: dict[str, float] | None = None,
     ):
         super().__init__(model_name)
         self.model_id = model_id
         self.conf_threshold = conf_threshold
         self.prompts = prompts or dict(DETECTION_PROMPTS)
+        self.class_conf = class_conf if class_conf is not None else dict(DETECTION_CONF)
         self.device = device
         self._model = None
         self._processor = None
+
+    def _accept(self, label: str, score: float) -> bool:
+        """True se lo score supera la soglia per-classe (o quella base)."""
+        return score >= self.class_conf.get(label, self.conf_threshold)
 
     def _resolve_device(self) -> str:
         if self.device:
@@ -247,7 +268,7 @@ class GroundingDinoAnalyzer(_OpenVocabAnalyzer):
         detections: list[Detection] = []
         for box, score, text in zip(results["boxes"], results["scores"], texts):
             label = _match_label(str(text))
-            if label is None:
+            if label is None or not self._accept(label, float(score)):
                 continue
             detections.append(
                 Detection(label=label, confidence=float(score), bbox=[float(v) for v in box.tolist()])
@@ -317,7 +338,7 @@ class OmDetTurboAnalyzer(_OpenVocabAnalyzer):
         detections: list[Detection] = []
         for box, score, text in zip(results["boxes"], results["scores"], texts):
             label = self.prompts.get(str(text)) or _match_label(str(text))
-            if label is None:
+            if label is None or not self._accept(label, float(score)):
                 continue
             detections.append(
                 Detection(label=label, confidence=float(score), bbox=[float(v) for v in box.tolist()])

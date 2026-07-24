@@ -234,6 +234,44 @@ class PersonPPEChecker:
     # Helmet    → testa sopra (espandi verso l'alto)
     _EXPANDED_PPE = {"Glove", "Cigarette", "Shoe", "Helmet"}
 
+    # ── Vincoli di plausibilita' geometrica per le classi soggette a FP ────────
+    # Occhiali: stanno sul volto -> devono cadere nella fascia superiore della
+    #   persona (entro _GLASSES_MAX_REL_Y dell'altezza, dall'alto).
+    # Sigaretta: oggetto minuscolo e sottile -> area < _CIGARETTE_MAX_AREA_RATIO
+    #   dell'area persona, larghezza < _CIGARETTE_MAX_WIDTH_RATIO della larghezza
+    #   persona (una sigaretta larga 1/3 della persona e' un blob mal classificato),
+    #   e non sta ai piedi.
+    _GLASSES_MAX_REL_Y = 0.35
+    _CIGARETTE_MAX_AREA_RATIO = 0.02
+    _CIGARETTE_MAX_WIDTH_RATIO = 0.15
+    _CIGARETTE_MAX_REL_Y = 0.75
+
+    def _plausible(self, cat: str, item_box: tuple, p_box: tuple | None) -> bool:
+        """
+        Filtro anti-falsi-positivi per occhiali/sigarette: verifica che la
+        posizione/dimensione dell'oggetto rispetto alla persona sia coerente
+        con dove quell'oggetto puo' realmente trovarsi. Le altre classi passano.
+        """
+        if p_box is None or cat not in ("Glasses", "Cigarette"):
+            return True
+        px1, py1, px2, py2 = p_box
+        ph = max(py2 - py1, 1e-6)
+        pw = max(px2 - px1, 1e-6)
+        icy = (item_box[1] + item_box[3]) / 2
+        rel_y = (icy - py1) / ph  # 0 = testa, 1 = piedi
+        if cat == "Glasses":
+            return rel_y <= self._GLASSES_MAX_REL_Y
+        # Cigarette
+        iw = max(item_box[2] - item_box[0], 0)
+        ih = max(item_box[3] - item_box[1], 0)
+        area_ratio = (iw * ih) / (pw * ph)
+        width_ratio = iw / pw
+        return (
+            area_ratio <= self._CIGARETTE_MAX_AREA_RATIO
+            and width_ratio <= self._CIGARETTE_MAX_WIDTH_RATIO
+            and rel_y <= self._CIGARETTE_MAX_REL_Y
+        )
+
     def _expand_bbox(self, p_box: tuple, fw: int, fh: int, ppe_cat: str) -> tuple:
         """
         Ritorna una bbox allargata della persona per catturare
@@ -304,7 +342,7 @@ class PersonPPEChecker:
                     best_score = score
                     best_pidx = p_i
 
-            if best_pidx is not None:
+            if best_pidx is not None and self._plausible(cat, item_box, person_boxes[best_pidx]):
                 assignments[best_pidx].append((cat, item_det, prohibited))
 
         # ── Costruisci i risultati ─────────────────────────────────────────────
