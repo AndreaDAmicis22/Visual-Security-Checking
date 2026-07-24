@@ -111,6 +111,23 @@ migliore su Helmet e Shoe. Nel complesso **GD > OmDet** (mAP@.5 0.516 vs 0.482).
   a **GD 15, OmDet 4**. ⚠️ Conteggi *detection-level*: i check geometrici di plausibilità (che
   nei video avevano azzerato i FP) **non** sono applicati qui → sovrastimano i FP del pipeline reale.
 
+### Effetto della NMS per-classe (prova)
+Aggiunta una **Non-Maximum Suppression per-classe** (IoU 0.5, `nms_per_class` in `analyzer.py`)
+per rimuovere i box duplicati/sovrapposti della stessa classe. Ricalcolo offline sui dump
+(variante `nms` in `eval_metrics_results.json`):
+
+| | mAP@.5 (senza→con NMS) | macro-F1 prod |
+|---|---|---|
+| Grounding DINO | 0.516 → **0.519** (+0.003) | 0.547 → 0.548 |
+| OmDet-Turbo | 0.482 → **0.482** (+0.000) | 0.508 → 0.508 |
+
+**Esito onesto: sulle metriche l'effetto è trascurabile.** Motivo: (a) la valutazione mAP già
+"assorbe" i duplicati (i box extra sullo stesso GT diventano FP a bassa confidence, poco pesanti
+sull'AP); (b) le over-detection sono per lo più box *spazialmente distinti*, non duplicati
+sovrapposti (la NMS rimuove solo 3 box su OmDet, 154 su GD). La NMS **resta utile** per: pulire
+l'output visivo (meno box accavallati nei video) e ridurre qualche FP; **non** è la leva per
+alzare le metriche — quelle sono limitate dalla difficoltà zero-shot sugli oggetti piccoli.
+
 ---
 
 ## 4. Statistiche temporali (video `ppe_video.mp4`, 240 frame 1280×720, skip=8)

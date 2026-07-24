@@ -200,8 +200,37 @@ sotto i 200 ms/frame — la scelta del backend è un flag (`--detector`).
 3. **Taratura sensibilità** — memoria PPE + persistenza + skip_frames vanno bilanciate per il caso
    d'uso reale (sorveglianza continua vs clip brevi).
 
-## 5 · Le lezioni
+## 5 · Validazione e messa a punto (2026-07-24)
 
+Dopo l'aggiunta di occhiali/sigarette, una tornata di prove per capire quanto valgono davvero i
+due detector e per ridurre i falsi positivi. Tutti i risultati in **`evaluation/REPORT.md`**.
+
+- **Falsi positivi occhiali/sigarette.** Nei video di test (dove non ci sono) i detector li
+  allucinavano. Corretti con due leve, calibrate misurando i FP reali: soglie di confidence
+  **per-classe** (`DETECTION_CONF`: Glasses 0.45, Cigarette 0.50, sopra il tetto dei FP misurati)
+  e **check geometrici** (`PersonPPEChecker._plausible`: occhiali solo in fascia-volto; sigaretta
+  piccola/stretta e non ai piedi). Esito: FP azzerati su entrambi i video.
+- **Benchmark su dataset (SH17).** Scelto SH17 (il PPE dataset più completo trovato — annotazioni
+  complete, occhiali inclusi; mappatura classi verificata a mano), subset **bilanciato di 259
+  immagini**. Metriche a soglie di produzione + **mAP** indipendente dalla soglia (cattura
+  detection grezze → calcolo offline). **GD mAP@.5 0.516 vs OmDet 0.482**: GD più accurato, OmDet
+  ~8.6× più veloce. Metriche modeste ma oneste — Person solido (~0.80), il calo è sugli oggetti
+  piccoli (guanti/scarpe/gilet): limite dello **zero-shot**, non delle soglie (ottimizzarle dà
+  solo +2 pt) né dei duplicati.
+- **Statistiche temporali (video).** OmDet 5.05 FPS eff. / 1.37 s mediana / 5 track; GD 0.59 FPS /
+  12.6 s / 3 track (identità più stabile). Su CPU solo OmDet è vicino al live.
+- **NMS per-classe (prova).** Aggiunta per togliere i box duplicati sovrapposti. Effetto sulle
+  metriche **trascurabile** (mAP +0.003 GD, +0.000 OmDet): la valutazione già assorbe i duplicati
+  e le over-detection sono box per lo più distinti. Tenuta comunque per pulire l'output visivo.
+- **Fine-tuning: rimandato.** Su questa CPU non è praticabile (full fine-tune ~40 h/epoca GD,
+  ~7 h/epoca OmDet). Va fatto su **GPU** (Colab ~2 h per OmDet). Per ora si resta zero-shot.
+
+## 6 · Le lezioni
+
+- **Misurare prima di ottimizzare.** Le metriche "brutte" andavano scomposte (soglia? IoU?
+  duplicati? difficoltà intrinseca?) prima di agire: la diagnosi ha mostrato che soglie e NMS
+  contano poco e il limite vero è lo zero-shot sugli oggetti piccoli. Tarare a caso avrebbe
+  sprecato ore di CPU.
 - **L'hardware è un requisito, non un dettaglio.** Il vincolo "CPU-only, 16 GB" ha ristretto lo
   spazio delle soluzioni più di qualsiasi altra cosa e andava messo al centro fin dall'inizio.
 - **Il cloud non è gratis in latenza.** Un VLM potente in rete sembra la scorciatoia, ma per il
