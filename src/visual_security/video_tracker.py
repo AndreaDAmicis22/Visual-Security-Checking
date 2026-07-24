@@ -272,6 +272,12 @@ class VideoSafetyTracker:
         self.max_alerts = max_alerts
         self.verbose = verbose
 
+        # Strumentazione temporale opzionale (off di default: non cambia la
+        # produzione). Se True, `run()` popola `frame_log` con un record per
+        # frame utile per statistiche temporali (latenza, FPS, carico).
+        self.collect_stats = False
+        self.frame_log: list[dict] = []
+
         self._alerts: list[FrameAlert] = []
 
     @property
@@ -361,6 +367,20 @@ class VideoSafetyTracker:
                     _draw_person(frame, pr, pr.person_idx in confirmed_idxs, fill)
 
                 n_pending = sum(1 for pr in last_ppr if not pr.is_compliant and pr.person_idx not in confirmed_idxs)
+
+                if self.collect_stats:
+                    self.frame_log.append(
+                        {
+                            "frame": frame_idx,
+                            "det_ran": (frame_idx - 1) % self.skip_frames == 0,
+                            "det_ms": last_ms,
+                            "n_persons": len(last_ppr),
+                            "n_pending": n_pending,
+                            "n_confirmed": len(confirmed),
+                            "n_alerts_cum": len(self._alerts),
+                        }
+                    )
+
                 _draw_hud(frame, frame_idx, live_fps, last_ms, len(last_ppr), n_pending, len(self._alerts))
 
                 if writer:

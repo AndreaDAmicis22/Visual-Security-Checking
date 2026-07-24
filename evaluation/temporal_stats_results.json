@@ -1,0 +1,59 @@
+{
+  "grounding-dino": {
+    "model_id": "IDEA-Research/grounding-dino-base",
+    "n_frames": 240,
+    "wall_seconds": 407.2,
+    "effective_fps": 0.589,
+    "detector_runs": 30,
+    "detection_latency_ms": {
+      "mean": 13518.9,
+      "median": 12576.7,
+      "p95": 13537.0,
+      "min": 12164.3,
+      "max": 38977.2
+    },
+    "persons_per_frame_mean": 1.83,
+    "tracks_created": 3,
+    "alerts": {
+      "n_confirmed": 13,
+      "time_to_first_s": 0.08,
+      "last_alert_s": 9.75,
+      "span_s": 9.67,
+      "violation_label_freq": {
+        "Glasses": 25,
+        "Glove": 25,
+        "Shoe": 24,
+        "Vest": 2
+      }
+    }
+  },
+  "omdet-turbo": {
+    "model_id": "omlab/omdet-turbo-swin-tiny-hf",
+    "n_frames": 240,
+    "wall_seconds": 47.5,
+    "effective_fps": 5.052,
+    "detector_runs": 30,
+    "detection_latency_ms": {
+      "mean": 1537.7,
+      "median": 1372.3,
+      "p95": 1442.0,
+      "min": 1248.8,
+      "max": 6342.4
+    },
+    "persons_per_frame_mean": 1.87,
+    "tracks_created": 5,
+    "alerts": {
+      "n_confirmed": 20,
+      "time_to_first_s": 0.08,
+      "last_alert_s": 9.75,
+      "span_s": 9.67,
+      "violation_label_freq": {
+        "Glasses": 39,
+        "Glove": 39,
+        "Shoe": 22,
+        "Helmet": 2,
+        "Vest": 2
+      }
+    }
+  }
+}

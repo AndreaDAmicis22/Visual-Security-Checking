@@ -105,3 +105,15 @@ python -m src.visual_security.debug_video --video video.mp4 --detector omdet-tur
 
 Su GPU entrambi scendono sotto i 200ms/frame. Per numeri aggiornati sul tuo
 hardware esegui `benchmark_tracker.ipynb`.
+
+## Valutazione (Grounding DINO vs OmDet-Turbo)
+
+Confronto quantitativo dei due detector su dataset etichettato (accuratezza) e
+su video (comportamento temporale) in **[evaluation/REPORT.md](evaluation/REPORT.md)**.
+
+In sintesi (subset bilanciato di 259 immagini SH17, IoU 0.5, soglie di produzione):
+
+| | macro-F1 | FPS effettivi (CPU) | Nota |
+|---|---|---|---|
+| Grounding DINO | **0.576** | 0.59 | più accurato, per analisi offline/GPU |
+| OmDet-Turbo | 0.508 | **5.05** | ~8.6× più veloce, per live su CPU |

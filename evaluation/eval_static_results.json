@@ -1,0 +1,146 @@
+{
+  "grounding-dino": {
+    "model_id": "IDEA-Research/grounding-dino-base",
+    "n_images": 259,
+    "iou_threshold": 0.5,
+    "per_class": {
+      "Person": {
+        "tp": 507,
+        "fp": 32,
+        "fn": 198,
+        "precision": 0.941,
+        "recall": 0.719,
+        "f1": 0.815
+      },
+      "Helmet": {
+        "tp": 132,
+        "fp": 58,
+        "fn": 96,
+        "precision": 0.695,
+        "recall": 0.579,
+        "f1": 0.632
+      },
+      "Vest": {
+        "tp": 117,
+        "fp": 81,
+        "fn": 144,
+        "precision": 0.591,
+        "recall": 0.448,
+        "f1": 0.51
+      },
+      "Glasses": {
+        "tp": 56,
+        "fp": 28,
+        "fn": 65,
+        "precision": 0.667,
+        "recall": 0.463,
+        "f1": 0.546
+      },
+      "Glove": {
+        "tp": 110,
+        "fp": 63,
+        "fn": 146,
+        "precision": 0.636,
+        "recall": 0.43,
+        "f1": 0.513
+      },
+      "Shoe": {
+        "tp": 126,
+        "fp": 31,
+        "fn": 288,
+        "precision": 0.803,
+        "recall": 0.304,
+        "f1": 0.441
+      }
+    },
+    "macro": {
+      "precision": 0.722,
+      "recall": 0.49,
+      "f1": 0.576
+    },
+    "micro": {
+      "precision": 0.782,
+      "recall": 0.528,
+      "f1": 0.63
+    },
+    "cigarette_detections_proxy_fp": 18,
+    "latency_ms": {
+      "mean": 9029.4,
+      "min": 7691.1,
+      "max": 9920.9
+    },
+    "wall_seconds": 2341.4
+  },
+  "omdet-turbo": {
+    "model_id": "omlab/omdet-turbo-swin-tiny-hf",
+    "n_images": 259,
+    "iou_threshold": 0.5,
+    "per_class": {
+      "Person": {
+        "tp": 497,
+        "fp": 70,
+        "fn": 208,
+        "precision": 0.877,
+        "recall": 0.705,
+        "f1": 0.781
+      },
+      "Helmet": {
+        "tp": 149,
+        "fp": 129,
+        "fn": 79,
+        "precision": 0.536,
+        "recall": 0.654,
+        "f1": 0.589
+      },
+      "Vest": {
+        "tp": 102,
+        "fp": 200,
+        "fn": 159,
+        "precision": 0.338,
+        "recall": 0.391,
+        "f1": 0.362
+      },
+      "Glasses": {
+        "tp": 38,
+        "fp": 14,
+        "fn": 83,
+        "precision": 0.731,
+        "recall": 0.314,
+        "f1": 0.439
+      },
+      "Glove": {
+        "tp": 102,
+        "fp": 87,
+        "fn": 154,
+        "precision": 0.54,
+        "recall": 0.398,
+        "f1": 0.458
+      },
+      "Shoe": {
+        "tp": 192,
+        "fp": 307,
+        "fn": 222,
+        "precision": 0.385,
+        "recall": 0.464,
+        "f1": 0.421
+      }
+    },
+    "macro": {
+      "precision": 0.568,
+      "recall": 0.488,
+      "f1": 0.508
+    },
+    "micro": {
+      "precision": 0.572,
+      "recall": 0.544,
+      "f1": 0.558
+    },
+    "cigarette_detections_proxy_fp": 4,
+    "latency_ms": {
+      "mean": 1415.8,
+      "min": 1171.6,
+      "max": 1721.7
+    },
+    "wall_seconds": 368.2
+  }
+}

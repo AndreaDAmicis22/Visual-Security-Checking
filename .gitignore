@@ -230,3 +230,9 @@ yolo/
 # Benchmark dataset (500 img etichettate, CC BY 4.0) - versionato: eccezioni agli ignore globali
 benchmark_data/
 benchmark_data/**
+
+# Evaluation: cache download SH17 e immagini del subset (ricostruibili con build_subset.py).
+# Restano versionati: script *.py, i risultati *_results.json e sh17_subset/ground_truth.json.
+evaluation/sh17_meta/
+evaluation/sh17_subset/images/
+evaluation/verify/
