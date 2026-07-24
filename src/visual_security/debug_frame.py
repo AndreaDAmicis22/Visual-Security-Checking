@@ -70,7 +70,7 @@ def run(image_path: str, detector_name: str, conf: float | None, cont_thr: float
                 x1,y1,x2,y2 = (int(v) for v in pr.person_bbox)
                 color = (40,200,60) if pr.is_compliant else (0,50,220)
                 cv.rectangle(img,(x1,y1),(x2,y2),color,2)
-                label = "OK" if pr.is_compliant else f"MISSING:{','.join(pr.missing_ppe)}"
+                label = "OK" if pr.is_compliant else f"VIOL:{','.join(pr.violation_labels)}"
                 cv.putText(img, label, (x1, max(y1-6,14)),
                            cv.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
                 cy = y1+18
@@ -80,6 +80,10 @@ def run(image_path: str, detector_name: str, conf: float | None, cont_thr: float
                     c = (40,200,60) if ok else (0,50,220)
                     cv.putText(img, f"{'v' if ok else 'x'}{cat}({found}/{req})",
                                (x1+4, cy), cv.FONT_HERSHEY_SIMPLEX, 0.38, c, 1)
+                    cy += 15
+                for cat in pr.prohibited_present:
+                    cv.putText(img, f"x VIETATO {cat}",
+                               (x1+4, cy), cv.FONT_HERSHEY_SIMPLEX, 0.38, (0,50,220), 1)
                     cy += 15
         for det in result.detections:
             if det.label.lower() != "person":

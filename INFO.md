@@ -12,24 +12,25 @@ Guida di riferimento interna: architettura della pipeline, ruolo di ogni file e 
 │ (Grounding DINO /    │                 │  (containment overlap) │
 │  OmDet-Turbo)        │                 └───────────┬────────────┘
 └──────────────────────┘                             │ PersonPPEResult list
+                                                      │ (mancanti + vietati)
                                          ┌───────────▼────────────┐
                                          │  PersonTracker         │
                                          │  (identità IoU +       │
                                          │   memoria PPE)         │
                                          └───────────┬────────────┘
                                                      │ track_id + missing smussati
-                     ┌──────────────┐    ┌───────────▼────────────┐
-                     │ ZoneMonitor  │───►│  VideoViolationTracker │
-                     │ (aree vietate│    │  (sliding window)      │
-                     │  punto-piedi)│    └───────────┬────────────┘
-                     └──────────────┘                │ violazioni confermate (PPE + zone)
+                                         ┌───────────▼────────────┐
+                                         │  VideoViolationTracker │
+                                         │  (sliding window)      │
+                                         └───────────┬────────────┘
+                                                     │ violazioni confermate
                                          ┌───────────▼────────────┐
                                          │  Output annotato       │
                                          │  (video / JSON log)    │
                                          └────────────────────────┘
 ```
 
-Principio chiave: **il detector lavora a oggetti singoli** (ogni guanto/scarpa è una detection indipendente), **il checker aggrega per categoria** (Glove 2/2, Shoe 2/2). Le **zone vietate** sono pura geometria (nessun modello): punto-piedi dentro poligono + persistenza.
+Principio chiave: **il detector lavora a oggetti singoli** (ogni guanto/scarpa è una detection indipendente), **il checker aggrega per categoria** (Glove 2/2, Shoe 2/2) e distingue **DPI richiesti** (violazione se mancano) da **item vietati** (violazione se presenti, es. sigarette).
 
 > Nota storica: fino a luglio 2026 esisteva uno stadio di validazione VLM (SmolVLM) come seconda
 > opinione sugli alert — serviva a compensare una YOLO addestrata male che non rilevava quasi mai
@@ -54,23 +55,20 @@ I detector sono **open-vocabulary**: le classi arrivano da prompt testuali (`DET
 Legge la sorgente frame per frame (file o webcam). Il detector gira solo ogni `skip_frames` frame; nei frame intermedi si riusano gli ultimi risultati. Ogni frame viene comunque annotato e scritto nel video di output.
 
 ### 2.2 Detection — `GroundingDinoAnalyzer` / `OmDetTurboAnalyzer`
-Inferenza zero-shot in-process: rileva oggetti **singoli** — Person, Helmet, Vest, ogni singolo Glove, ogni singola Shoe — da prompt testuali, con bbox pixel e confidence. Il testo matchato dal modello viene riportato alla categoria canonica tramite keyword (`_match_label`).
+Inferenza zero-shot in-process: rileva oggetti **singoli** — Person, Helmet, Vest, Glasses, ogni singolo Glove, ogni singola Shoe, più gli item vietati (Cigarette) — da prompt testuali, con bbox pixel e confidence. Il testo matchato dal modello viene riportato alla categoria canonica tramite keyword (`_match_label`).
 
 ### 2.3 Associazione — `PersonPPEChecker`
-Per ogni frame, assegna ogni DPI alla persona con l'overlap maggiore (containment + IoU, con bbox della persona espansa per guanti/scarpe/casco che sporgono dal corpo). Conta i DPI per categoria e li confronta con i requisiti (Helmet 1, Vest 1, Glove 2, Shoe 2) → lista `missing_ppe` per persona. È **stateless**.
+Per ogni frame, assegna ogni oggetto alla persona con l'overlap maggiore (containment + IoU, con bbox della persona espansa per guanti/scarpe/casco/sigarette che sporgono dal corpo). Conta i DPI per categoria e li confronta con i requisiti (`REQUIRED_PPE_COUNTS`: Helmet 1, Vest 1, Glasses 1, Glove 2, Shoe 2) → lista `missing_ppe`; separatamente registra gli item vietati (`PROHIBITED_ITEMS`: Cigarette) trovati addosso → lista `prohibited_present`. La proprietà `violation_labels` unisce le due liste. È **stateless**.
 
 ### 2.4 Identità + memoria — `PersonTracker`
 Associa le persone tra frame consecutivi per IoU e assegna un `track_id` stabile (mostrato come `[T3]`). Per ogni persona ricorda i DPI visti di recente: un guanto osservato negli ultimi `ppe_memory_frames` frame è considerato ancora presente anche se il detector lo perde per occlusione/blur. È il filtro anti-violazioni-fantasma.
 
 ### 2.5 Persistenza — `VideoViolationTracker`
-Sliding window per chiave `track_id + set di DPI mancanti`: la violazione viene **confermata** solo se appare in almeno `persistence_frames` degli ultimi `window_frames`, poi entra in cooldown (30 frame). La cella di griglia resta solo come fallback per persone senza track.
+Sliding window per chiave `track_id + violation_labels` (DPI mancanti **e** item vietati presenti): la violazione viene **confermata** solo se appare in almeno `persistence_frames` degli ultimi `window_frames`, poi entra in cooldown (30 frame). La cella di griglia resta solo come fallback per persone senza track.
 
-### 2.6 Aree vietate — `ZoneMonitor`
-Poligoni definiti in JSON (coordinate normalizzate 0-1 o pixel). Una persona è "in zona" se il **punto-piedi** (centro del lato inferiore della bbox, cioè la proiezione a terra) cade nel poligono (`cv.pointPolygonTest`). Stessa logica di persistenza dei PPE (window + cooldown per chiave `track@zona`). Overlay semitrasparente sul video; la zona diventa rossa quando è attiva una violazione.
-
-### 2.7 Output
-- **Video annotato**: verde = OK, gradiente giallo→rosso = violazione in accumulo (con % di riempimento window), rosso = alert confermato; zone vietate in overlay (arancione/rosso) + punto-piedi delle persone dentro; HUD con FPS/contatori.
-- **JSON log**: per ogni alert, timestamp, frame, `track_id`, DPI trovati/mancanti, bbox, e `zone_violations` (zona, persona, punto-piedi).
+### 2.6 Output
+- **Video annotato**: verde = OK, gradiente giallo→rosso = violazione in accumulo (con % di riempimento window), rosso = alert confermato; nel riquadro di ogni persona la checklist dei DPI (✔/✘) e le righe rosse `VIETATO <item>` per gli item proibiti presenti; HUD con FPS/contatori.
+- **JSON log**: per ogni alert, timestamp, frame, `track_id`, DPI trovati/mancanti, `prohibited_present`, bbox.
 
 ---
 
@@ -80,17 +78,16 @@ Poligoni definiti in JSON (coordinate normalizzate 0-1 o pixel). Una persona è 
 | File | Ruolo |
 |---|---|
 | `analyzer.py` | Modelli dati (`Detection`, `AnalysisResult`), prompt open-vocabulary (`DETECTION_PROMPTS`), `BaseAnalyzer` (astratta, timing/error-handling), `GroundingDinoAnalyzer` + `OmDetTurboAnalyzer` (transformers, Apache 2.0), factory `build_detector()`. |
-| `person_ppe_checker.py` | Associazione persona↔DPI: normalizzazione bbox universale (`_to_xyxy`), overlap containment+IoU, assegnazione greedy, bbox espansa per DPI periferici. Produce `PersonPPEResult`. |
+| `person_ppe_checker.py` | Associazione persona↔oggetti: normalizzazione bbox universale (`_to_xyxy`), overlap containment+IoU, assegnazione greedy, bbox espansa per oggetti periferici. Distingue DPI richiesti (`REQUIRED_PPE_COUNTS`) da item vietati (`PROHIBITED_ITEMS`). Produce `PersonPPEResult`. |
 | `person_tracker.py` | Identità persistente (matching greedy IoU tra frame → `track_id`) + memoria PPE temporale (`ppe_memory_frames`). Riscrive `missing_ppe` con l'evidenza recente. |
-| `zone_monitor.py` | Aree vietate: `RestrictedZone` (poligono da JSON), `ZoneMonitor.check()` (punto-piedi + persistenza + cooldown), `draw()` (overlay). |
-| `video_tracker.py` | Orchestratore: `VideoViolationTracker` (sliding window + cooldown per identità), `VideoSafetyTracker` (loop video, zone, disegno, log), `build_tracker()` (factory). |
+| `video_tracker.py` | Orchestratore: `VideoViolationTracker` (sliding window + cooldown per identità), `VideoSafetyTracker` (loop video, disegno, log), `build_tracker()` (factory). |
 
 ### Interfacce
 | File | Ruolo |
 |---|---|
-| `__init__.py` | API pubblica del package (analyzer, checker, tracker, zone, factory). |
+| `__init__.py` | API pubblica del package (analyzer, checker, tracker, factory). |
 | `__main__.py` | Entry point `python -m visual_security` → `cli.main()`. |
-| `cli.py` | CLI `argparse` con sottocomandi `track` (tracking real-time: `--detector`, `--zones`, soglie) e `check-backend` (verifica torch/transformers). |
+| `cli.py` | CLI `argparse` con sottocomandi `track` (tracking real-time: `--detector`, soglie) e `check-backend` (verifica torch/transformers). |
 
 ### Utility e dati
 | File | Ruolo |
@@ -122,7 +119,6 @@ Poligoni definiti in JSON (coordinate normalizzate 0-1 o pixel). Una persona è 
 | `skip_frames` | 1 | Detector ogni N frame. Su CPU con grounding-dino usare 8+. |
 | `ppe_memory_frames` | 48 (~2s) | Memoria PPE del PersonTracker. Più alto = meno falsi allarmi ma sistema più "indulgente". |
 | `persistence_frames` / `window_frames` | 4 / 7 | Una violazione è confermata se presente in ≥ persistence degli ultimi window frame. |
-| `zones_file` | None | JSON con i poligoni delle aree vietate. |
 
 **Nota sensibilità**: memoria PPE e persistenza si sommano — con `skip_frames` alto (necessario per grounding-dino su CPU) abbassare `persistence_frames` (es. 3/6), altrimenti su clip brevi non si conferma nulla.
 

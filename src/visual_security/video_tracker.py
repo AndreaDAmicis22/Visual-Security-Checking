@@ -8,17 +8,18 @@ Architecture:
   │ (GroundingDINO)│                  │  (containment overlap) │
   └────────────────┘                  └───────────┬────────────┘
                                                   │ PersonPPEResult list
+                                                  │ (PPE mancanti + item vietati)
                                       ┌───────────▼────────────┐
                                       │  PersonTracker         │
                                       │  (identita' IoU +      │
                                       │   memoria PPE)         │
                                       └───────────┬────────────┘
                                                   │ track_id + missing smussati
-                    ┌─────────────┐   ┌───────────▼────────────┐
-                    │ ZoneMonitor │──►│  VideoViolationTracker │
-                    │(aree vietate│   │  (sliding window)      │
-                    │ punto-piedi)│   └───────────┬────────────┘
-                    └─────────────┘               │ violazioni confermate (PPE + zone)
+                                      ┌───────────▼────────────┐
+                                      │  VideoViolationTracker │
+                                      │  (sliding window)      │
+                                      └───────────┬────────────┘
+                                                  │ violazioni confermate
                                       ┌───────────▼────────────┐
                                       │  Output annotato       │
                                       │  (finestra / file)     │
@@ -37,7 +38,7 @@ from __future__ import annotations
 import json
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -50,7 +51,6 @@ if TYPE_CHECKING:
     import numpy as np
 
     from .analyzer import BaseAnalyzer
-    from .zone_monitor import ZoneMonitor, ZoneViolation
 
 
 # ── Alert ─────────────────────────────────────────────────────────────────────
@@ -59,10 +59,6 @@ class FrameAlert:
     frame_idx: int
     timestamp_s: float
     person_results: list[PersonPPEResult]
-    # Violazioni di zona vietata confermate in questo frame (persone dentro
-    # poligoni proibiti). Indipendenti dai PPE: un alert puo' nascere anche
-    # solo da queste.
-    zone_violations: list[ZoneViolation] = field(default_factory=list)
 
     @property
     def violations(self) -> list[PersonPPEResult]:
@@ -70,11 +66,8 @@ class FrameAlert:
 
     def summary(self) -> str:
         viol = self.violations
-        parts = " | ".join(p.summary() for p in viol)
-        zones = " | ".join(zv.summary() for zv in self.zone_violations)
-        body = " || ".join(s for s in (parts, zones) if s)
-        n = len(viol) + len(self.zone_violations)
-        return f"[t={self.timestamp_s:.1f}s frame={self.frame_idx}] {n} violazione/i: {body}"
+        body = " | ".join(p.summary() for p in viol)
+        return f"[t={self.timestamp_s:.1f}s frame={self.frame_idx}] {len(viol)} violazione/i: {body}"
 
 
 # ── Persistence tracker ───────────────────────────────────────────────────────
@@ -102,7 +95,7 @@ class VideoViolationTracker:
         self._cooldown: dict[str, int] = {}
 
     def _key(self, pr: PersonPPEResult, fw: int, fh: int) -> str:
-        missing = "|".join(sorted(pr.missing_ppe))
+        missing = "|".join(sorted(pr.violation_labels))
         # Identita' vera dal PersonTracker: la persona che si muove non cambia
         # chiave (la cella di griglia resta come fallback per persone non tracciate).
         if pr.track_id is not None:
@@ -174,12 +167,12 @@ def _draw_person(img: np.ndarray, pr: PersonPPEResult, confirmed: bool, fill: fl
         color, label, thick = _C["green"], f"{tid}PPE OK", 2
     elif confirmed:
         color = _C["red"]
-        label = f"{tid}ALERT: {', '.join(pr.missing_ppe)}"
+        label = f"{tid}ALERT: {', '.join(pr.violation_labels)}"
         thick = 3
     else:
         g = int(190 - fill * 150)
         color = (20, g, 230)
-        label = f"{tid}[{int(fill * 100)}%] {', '.join(pr.missing_ppe)}"
+        label = f"{tid}[{int(fill * 100)}%] {', '.join(pr.violation_labels)}"
         thick = 2
 
     cv.rectangle(img, (x1, y1), (x2, y2), color, thick)
@@ -192,6 +185,12 @@ def _draw_person(img: np.ndarray, pr: PersonPPEResult, confirmed: bool, fill: fl
         c = _C["green"] if ok else _C["red"]
         mark = chr(0x2714) if ok else chr(0x2718)
         cv.putText(img, f"{mark} {cat} {found}/{req}", (x1 + 4, cy), cv.FONT_HERSHEY_SIMPLEX, 0.38, c, 1, cv.LINE_AA)
+        cy += 15
+    # Item vietati presenti (es. sigaretta): sempre in rosso, la presenza e' violazione.
+    for cat in pr.prohibited_present:
+        cv.putText(
+            img, f"{chr(0x2718)} VIETATO {cat}", (x1 + 4, cy), cv.FONT_HERSHEY_SIMPLEX, 0.38, _C["red"], 1, cv.LINE_AA
+        )
         cy += 15
 
 
@@ -220,13 +219,15 @@ def _draw_hud(
 # ── VideoSafetyTracker ────────────────────────────────────────────────────────
 class VideoSafetyTracker:
     """
-    Pipeline completa di tracking video per la sicurezza PPE + aree vietate.
+    Pipeline completa di tracking video per la sicurezza PPE.
+
+    Verifica per ogni persona i PPE richiesti (casco, gilet, occhiali,
+    guanti, scarpe) e la presenza di item vietati (sigarette).
 
     Parameters
     ----------
     detector            Detector open-vocabulary (BaseAnalyzer) configurato.
     ppe_checker         PersonPPEChecker (default: set PPE completo).
-    zone_monitor        ZoneMonitor opzionale per le aree vietate.
     persistence_frames  Frame positivi necessari nella window per confermare.
     window_frames       Larghezza sliding window (≥ persistence_frames).
     skip_frames         Esegui il detector ogni N frame (1 = ogni frame).
@@ -244,7 +245,6 @@ class VideoSafetyTracker:
         self,
         detector: BaseAnalyzer,
         ppe_checker: PersonPPEChecker | None = None,
-        zone_monitor: ZoneMonitor | None = None,
         persistence_frames: int = 4,
         window_frames: int = 7,
         skip_frames: int = 1,
@@ -257,7 +257,6 @@ class VideoSafetyTracker:
     ):
         self.detector = detector
         self.checker = ppe_checker or PersonPPEChecker()
-        self.zones = zone_monitor
         self._vio_tracker = VideoViolationTracker(
             threshold_frames=persistence_frames,
             window=max(window_frames, persistence_frames),
@@ -320,7 +319,6 @@ class VideoSafetyTracker:
                 live_fps = sum(fps_buf) / len(fps_buf)
 
                 # ── Detection + PPE check ────────────────────────────────────
-                zone_viol: list[ZoneViolation] = []
                 if (frame_idx - 1) % self.skip_frames == 0:
                     det_res = self.detector.analyze(frame)
                     last_ms = det_res.inference_time_ms
@@ -340,22 +338,16 @@ class VideoSafetyTracker:
                             for pr in last_ppr:
                                 print(f"  {pr.summary()}")
 
-                    # ── Zone vietate (solo sui frame con detection fresca) ────
-                    if self.zones is not None:
-                        zone_viol = self.zones.check(last_ppr, fw, fh)
-
                 # ── Persistence filtering ────────────────────────────────────
                 confirmed = self._vio_tracker.update(last_ppr, fw, fh)
-                zone_confirmed = [zv for zv in zone_viol if zv.confirmed]
 
                 # ── Alert ────────────────────────────────────────────────────
-                if confirmed or zone_confirmed:
+                if confirmed:
                     ts = cap.get(cv.CAP_PROP_POS_MSEC) / 1000.0
                     alert = FrameAlert(
                         frame_idx=frame_idx,
                         timestamp_s=ts,
                         person_results=last_ppr,
-                        zone_violations=list(zone_confirmed),
                     )
                     self._alerts.append(alert)
                     print(alert.summary())
@@ -363,13 +355,6 @@ class VideoSafetyTracker:
                         break
 
                 # ── Annotazione ──────────────────────────────────────────────
-                if self.zones is not None:
-                    active_zones = {zv.zone_name for zv in zone_viol}
-                    self.zones.draw(frame, active_zones)
-                    for zv in zone_viol:
-                        color = _C["red"] if zv.confirmed else _C["yellow"]
-                        cv.circle(frame, zv.foot_point, 6, color, -1, cv.LINE_AA)
-
                 confirmed_idxs = {pr.person_idx for pr in confirmed}
                 for pr in last_ppr:
                     fill = self._vio_tracker.fill(pr, fw, fh)
@@ -407,20 +392,11 @@ class VideoSafetyTracker:
                         "person_idx": p.person_idx,
                         "track_id": p.track_id,
                         "missing_ppe": p.missing_ppe,
+                        "prohibited_present": p.prohibited_present,
                         "found_ppe": p.found_ppe,
                         "bbox": list(p.person_bbox) if p.person_bbox else None,
                     }
                     for p in a.violations
-                ],
-                "zone_violations": [
-                    {
-                        "zone": zv.zone_name,
-                        "person_idx": zv.person_idx,
-                        "track_id": zv.track_id,
-                        "foot_point": list(zv.foot_point),
-                        "bbox": list(zv.person_bbox) if zv.person_bbox else None,
-                    }
-                    for zv in a.zone_violations
                 ],
             }
             for a in self._alerts
@@ -433,7 +409,6 @@ class VideoSafetyTracker:
 # ── Factory ───────────────────────────────────────────────────────────────────
 def build_tracker(
     detector: str = "grounding-dino",
-    zones_file: str | None = None,
     persistence_frames: int = 4,
     window_frames: int = 7,
     skip_frames: int = 1,
@@ -453,9 +428,6 @@ def build_tracker(
         Backend di detection open-vocabulary (Apache 2.0, no Ultralytics):
         "grounding-dino" (default, massima accuratezza zero-shot) o
         "omdet-turbo" (real-time, piu' veloce).
-    zones_file : str | None
-        Percorso di un JSON con le aree vietate (vedi zone_monitor.py per il
-        formato). None = monitoraggio zone disattivato.
     ppe_memory_frames : int
         Memoria PPE del PersonTracker: un PPE visto negli ultimi N frame e'
         considerato ancora presente anche se il detector lo perde temporaneamente
@@ -465,7 +437,6 @@ def build_tracker(
     -------
         tracker = build_tracker(
             detector="grounding-dino",
-            zones_file="zones.json",
             save_output="output/annotated.mp4",
             alert_log="output/alerts.json",
             verbose=True,
@@ -477,20 +448,8 @@ def build_tracker(
     det = build_detector(detector, conf_threshold=detector_conf)
     print(f"[Detector] backend '{detector}' ({det.model_id}) — Apache 2.0, zero-shot.")
 
-    zones = None
-    if zones_file:
-        from .zone_monitor import ZoneMonitor
-
-        zones = ZoneMonitor.from_json(
-            zones_file,
-            persistence_frames=persistence_frames,
-            window_frames=max(window_frames, persistence_frames),
-        )
-        print(f"[Zone] {len(zones.zones)} area/e vietata/e da {zones_file}: {[z.name for z in zones.zones]}")
-
     return VideoSafetyTracker(
         detector=det,
-        zone_monitor=zones,
         persistence_frames=persistence_frames,
         window_frames=max(window_frames, persistence_frames),
         skip_frames=skip_frames,

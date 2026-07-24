@@ -1,9 +1,13 @@
 """
 Person-centric PPE Completeness Checker.
 
-Per ogni 'Person' rilevata dal detector, verifica che i PPE richiesti
-(Helmet, Vest, Glove ×2, Shoe ×2) siano spazialmente associati
-tramite containment overlap con la bounding box della persona.
+Per ogni 'Person' rilevata dal detector, verifica due cose associando gli
+oggetti alla bounding box della persona tramite containment overlap:
+
+  * PPE RICHIESTI (Helmet, Vest, Glasses, Glove ×2, Shoe ×2): devono essere
+    presenti; se mancano -> violazione.
+  * item PROIBITI (Cigarette): NON devono essere presenti; se sono associati
+    a una persona -> violazione (logica invertita rispetto ai PPE).
 """
 
 from __future__ import annotations
@@ -13,9 +17,13 @@ from dataclasses import dataclass, field
 REQUIRED_PPE_COUNTS: dict[str, int] = {
     "Helmet": 1,
     "Vest": 1,
+    "Glasses": 1,
     "Glove": 2,
     "Shoe": 2,
 }
+
+# Item la cui PRESENZA addosso a una persona costituisce violazione.
+PROHIBITED_ITEMS: tuple[str, ...] = ("Cigarette",)
 
 _PPE_LABEL_MAP: dict[str, str] = {
     "helmet": "Helmet",
@@ -26,6 +34,9 @@ _PPE_LABEL_MAP: dict[str, str] = {
     "hi-vis": "Vest",
     "hiviz": "Vest",
     "safety-vest": "Vest",
+    "glasses": "Glasses",
+    "goggles": "Glasses",
+    "safety-glasses": "Glasses",
     "glove": "Glove",
     "gloves": "Glove",
     "shoe": "Shoe",
@@ -34,6 +45,12 @@ _PPE_LABEL_MAP: dict[str, str] = {
     "boots": "Shoe",
     "safety-boot": "Shoe",
     "safety-boots": "Shoe",
+}
+
+_PROHIBITED_LABEL_MAP: dict[str, str] = {
+    "cigarette": "Cigarette",
+    "cigarettes": "Cigarette",
+    "cig": "Cigarette",
 }
 
 
@@ -142,6 +159,9 @@ class PersonPPEResult:
     frame_size: tuple = (640, 640)  # (w, h) usato per normalizzare bbox
     found_ppe: dict[str, int] = field(default_factory=dict)
     missing_ppe: list[str] = field(default_factory=list)
+    # Item proibiti (es. sigarette) trovati addosso alla persona: la loro
+    # presenza e' gia' di per se' una violazione.
+    prohibited_present: list[str] = field(default_factory=list)
     associated_ppe: list = field(default_factory=list)
     # Identita' persistente assegnata da PersonTracker (None = non tracciata,
     # es. analisi single-frame in debug_frame.py).
@@ -149,17 +169,34 @@ class PersonPPEResult:
 
     @property
     def is_compliant(self) -> bool:
-        return len(self.missing_ppe) == 0
+        return not self.missing_ppe and not self.prohibited_present
+
+    @property
+    def violation_labels(self) -> list[str]:
+        """
+        Etichette di tutte le violazioni della persona, usate come chiave di
+        persistenza / testo negli alert: PPE mancanti + item proibiti presenti
+        (questi ultimi prefissati "NO " per distinguerli, es. "NO Cigarette").
+        """
+        return [*self.missing_ppe, *(f"NO {p}" for p in self.prohibited_present)]
 
     def summary(self) -> str:
-        status = "OK" if self.is_compliant else f"MANCANTI: {self.missing_ppe}"
+        if self.is_compliant:
+            status = "OK"
+        else:
+            parts = []
+            if self.missing_ppe:
+                parts.append(f"MANCANTI: {self.missing_ppe}")
+            if self.prohibited_present:
+                parts.append(f"VIETATI: {self.prohibited_present}")
+            status = " ".join(parts)
         tid = f"[T{self.track_id}]" if self.track_id is not None else ""
         return f"Persona#{self.person_idx}{tid}(conf={self.person_conf:.2f}) trovati={self.found_ppe} | {status}"
 
 
 class PersonPPEChecker:
     """
-    Associa le detection YOLO alle persone e valuta la completezza dei PPE.
+    Associa le detection alle persone e valuta DPI richiesti + item vietati.
 
     Parameters
     ----------
@@ -190,24 +227,25 @@ class PersonPPEChecker:
         self.iou_threshold = iou_threshold
         self.no_bbox_policy = no_bbox_policy
 
-    # ── PPE che tendono a stare FUORI dalla bbox persona ──────────────────────
-    # Gloves → mani ai lati (espandi orizzontalmente)
-    # Shoes  → piedi sotto (espandi verso il basso)
-    # Helmet → testa sopra (espandi verso l'alto)
-    _EXPANDED_PPE = {"Glove", "Shoe", "Helmet"}
+    # ── Oggetti che tendono a stare FUORI dalla bbox persona ──────────────────
+    # Gloves    → mani ai lati (espandi orizzontalmente)
+    # Cigarette → in mano o alla bocca: come i guanti, spesso ai bordi laterali
+    # Shoes     → piedi sotto (espandi verso il basso)
+    # Helmet    → testa sopra (espandi verso l'alto)
+    _EXPANDED_PPE = {"Glove", "Cigarette", "Shoe", "Helmet"}
 
     def _expand_bbox(self, p_box: tuple, fw: int, fh: int, ppe_cat: str) -> tuple:
         """
         Ritorna una bbox allargata della persona per catturare
-        PPE che fisicamente escono dal bordo del corpo.
-        - Glove: +40% larghezza su entrambi i lati
+        oggetti che fisicamente escono dal bordo del corpo.
+        - Glove/Cigarette: +40% larghezza su entrambi i lati
         - Shoe:  +40% altezza verso il basso, +15% larghezza
         - Helmet: +20% altezza verso l'alto, +10% larghezza
         """
         x1, y1, x2, y2 = p_box
         w = x2 - x1
         h = y2 - y1
-        if ppe_cat == "Glove":
+        if ppe_cat in ("Glove", "Cigarette"):
             pad_x = w * 0.40
             return (max(0, x1 - pad_x), y1, min(fw, x2 + pad_x), y2)
         if ppe_cat == "Shoe":
@@ -226,10 +264,16 @@ class PersonPPEChecker:
         frame_w/frame_h servono per denormalizzare bbox se necessario.
         """
         persons = [(i, d) for i, d in enumerate(detections) if d.label.lower() == "person"]
-        ppe_items = [
-            (i, d, _PPE_LABEL_MAP[d.label.lower().strip()])
-            for i, d in enumerate(detections)
+        # Ogni item porta con se' un flag `prohibited` per instradarlo nel
+        # ramo giusto dopo l'associazione (stessa geometria per entrambi).
+        items = [
+            (d, _PPE_LABEL_MAP[d.label.lower().strip()], False)
+            for d in detections
             if d.label.lower().strip() in _PPE_LABEL_MAP
+        ] + [
+            (d, _PROHIBITED_LABEL_MAP[d.label.lower().strip()], True)
+            for d in detections
+            if d.label.lower().strip() in _PROHIBITED_LABEL_MAP
         ]
 
         if not persons:
@@ -238,11 +282,11 @@ class PersonPPEChecker:
         # Pre-calcola le bbox di tutte le persone
         person_boxes = {i: _to_xyxy(d.bbox, frame_w, frame_h) for i, d in persons}
 
-        # ── Greedy assignment: ogni PPE va alla persona con overlap maggiore ──
+        # ── Greedy assignment: ogni item va alla persona con overlap maggiore ──
         # Evita che uno stesso item venga contato per più persone
-        assignments: dict[int, list[tuple[str, object]]] = {i: [] for i, _ in persons}
+        assignments: dict[int, list[tuple[str, object, bool]]] = {i: [] for i, _ in persons}
 
-        for _, item_det, ppe_cat in ppe_items:
+        for item_det, cat, prohibited in items:
             item_box = _to_xyxy(item_det.bbox, frame_w, frame_h)
             if item_box is None:
                 continue
@@ -253,15 +297,15 @@ class PersonPPEChecker:
                 p_box = person_boxes.get(p_i)
                 if p_box is None:
                     continue
-                # Usa la bbox espansa per PPE che escono dal corpo
-                search_box = self._expand_bbox(p_box, frame_w, frame_h, ppe_cat) if ppe_cat in self._EXPANDED_PPE else p_box
+                # Usa la bbox espansa per gli oggetti che escono dal corpo
+                search_box = self._expand_bbox(p_box, frame_w, frame_h, cat) if cat in self._EXPANDED_PPE else p_box
                 score = _overlap_ratio(item_box, search_box)
                 if score >= self.containment_threshold and score > best_score:
                     best_score = score
                     best_pidx = p_i
 
             if best_pidx is not None:
-                assignments[best_pidx].append((ppe_cat, item_det))
+                assignments[best_pidx].append((cat, item_det, prohibited))
 
         # ── Costruisci i risultati ─────────────────────────────────────────────
         results: list[PersonPPEResult] = []
@@ -269,10 +313,15 @@ class PersonPPEChecker:
             p_box = person_boxes[p_i]
 
             found_counts: dict[str, int] = dict.fromkeys(self.required_ppe, 0)
+            prohibited_found: list[str] = []
             assoc_dets = []
-            for ppe_cat, det in assignments[p_i]:
-                found_counts[ppe_cat] = found_counts.get(ppe_cat, 0) + 1
+            for cat, det, prohibited in assignments[p_i]:
                 assoc_dets.append(det)
+                if prohibited:
+                    if cat not in prohibited_found:
+                        prohibited_found.append(cat)
+                else:
+                    found_counts[cat] = found_counts.get(cat, 0) + 1
 
             if p_box is None:
                 missing = list(self.required_ppe.keys()) if self.no_bbox_policy == "all_missing" else []
@@ -287,6 +336,7 @@ class PersonPPEChecker:
                     frame_size=(frame_w, frame_h),
                     found_ppe=found_counts,
                     missing_ppe=missing,
+                    prohibited_present=sorted(prohibited_found),
                     associated_ppe=assoc_dets,
                 )
             )

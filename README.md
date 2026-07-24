@@ -1,8 +1,11 @@
 # Visual Security — PPE Tracker
 
-Real-time PPE (Personal Protective Equipment) tracker + monitoraggio aree vietate per cantieri.
+Real-time PPE (Personal Protective Equipment) tracker per cantieri.
 
-Pipeline: **detector open-vocabulary** (Grounding DINO / OmDet-Turbo, zero-shot) → **PersonPPEChecker** (associazione DPI↔persona) → **PersonTracker** (identità + memoria PPE) → **sliding window** (conferma violazioni persistenti) → **ZoneMonitor** (aree vietate) → video annotato + log JSON.
+Verifica per ogni persona i **DPI richiesti** (casco, gilet, occhiali, guanti,
+scarpe) e la presenza di **item vietati** (sigarette).
+
+Pipeline: **detector open-vocabulary** (Grounding DINO / OmDet-Turbo, zero-shot) → **PersonPPEChecker** (associazione DPI↔persona) → **PersonTracker** (identità + memoria PPE) → **sliding window** (conferma violazioni persistenti) → video annotato + log JSON.
 
 > Per l'architettura completa, il ruolo di ogni file, i parametri di taratura e le decisioni di design: **[INFO.md](INFO.md)**.
 
@@ -19,8 +22,9 @@ sorgente dell'applicazione. Per questo è stata rimossa completamente.
 | Detection (alternativa real-time) | [omlab/omdet-turbo-swin-tiny-hf](https://huggingface.co/omlab/omdet-turbo-swin-tiny-hf) | Apache 2.0 |
 
 I detector sono **open-vocabulary**: rilevano le classi da prompt testuali
-("a person", "a hard hat", "a reflective safety vest", ...) **senza alcun
+("a person", "a hard hat", "safety glasses", "a cigarette", ...) **senza alcun
 training** — niente dataset PPE da trovare/etichettare, niente fine-tuning.
+Aggiungere una classe = aggiungere una frase in `DETECTION_PROMPTS` (analyzer.py).
 
 > Nota storica: la pipeline includeva uno stadio di validazione VLM (SmolVLM)
 > nato per compensare una YOLO addestrata male su guanti e scarpe. Con i
@@ -45,10 +49,9 @@ scaricati automaticamente da HuggingFace al primo utilizzo (~1GB).
 # Track a video
 python -m visual_security.cli track --source video.mp4
 
-# Track completo: zone vietate + output annotato + log
+# Track completo: output annotato + log
 python -m visual_security.cli track \
     --source video.mp4 \
-    --zones zones.example.json \
     --save-output output/annotated.mp4 \
     --alert-log output/alerts.json
 
@@ -59,25 +62,16 @@ python -m visual_security.cli track --source 0 --detector omdet-turbo
 python -m visual_security.cli check-backend
 ```
 
-### Aree vietate
+### Cosa viene verificato
 
-Definisci i poligoni in un file JSON (coordinate normalizzate 0-1 o pixel):
+| Categoria | Voci | Regola |
+|---|---|---|
+| DPI richiesti | Casco ×1, Gilet ×1, Occhiali ×1, Guanti ×2, Scarpe ×2 | violazione se **manca** |
+| Item vietati | Sigaretta | violazione se **presente** |
 
-```json
-{
-  "zones": [
-    {
-      "name": "Area gru",
-      "polygon": [[0.05, 0.55], [0.40, 0.55], [0.40, 0.98], [0.05, 0.98]],
-      "normalized": true
-    }
-  ]
-}
-```
-
-Una persona è "in zona" se il suo **punto-piedi** (centro del lato inferiore
-della bbox) cade nel poligono; l'alert scatta solo se la presenza **persiste**
-per N frame (stessa sliding window dei PPE). Vedi `zones.example.json`.
+Le quantità richieste sono in `REQUIRED_PPE_COUNTS` e gli item vietati in
+`PROHIBITED_ITEMS` (entrambi in `person_ppe_checker.py`). In entrambi i casi
+l'alert scatta solo se la condizione **persiste** per N frame (sliding window).
 
 ### Notebook
 

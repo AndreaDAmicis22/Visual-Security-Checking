@@ -6,10 +6,9 @@ Usage examples:
   # Track a video file
   python -m visual_security.cli track --source video.mp4
 
-  # Track with restricted zones + annotated output
+  # Track with annotated output + alert log
   python -m visual_security.cli track \
       --source video.mp4 \
-      --zones zones.example.json \
       --save-output output/annotated.mp4 \
       --alert-log output/alerts.json
 
@@ -28,12 +27,11 @@ import argparse
 
 
 def cmd_track(args):
-    """Real-time video tracking: open-vocab detector + zones."""
+    """Real-time video tracking con detector open-vocabulary."""
     from .video_tracker import build_tracker
 
     tracker = build_tracker(
         detector=args.detector,
-        zones_file=args.zones,
         persistence_frames=args.persistence,
         window_frames=args.window,
         skip_frames=args.skip_frames,
@@ -71,12 +69,12 @@ def cmd_check_backend(args):  # noqa: ARG001
 def main():
     parser = argparse.ArgumentParser(
         prog="visual_security",
-        description="PPE Safety Tracker - detector open-vocabulary (Apache 2.0) + zone vietate",
+        description="PPE Safety Tracker - detector open-vocabulary (Apache 2.0)",
     )
     sub = parser.add_subparsers(dest="command")
 
     # ── track ─────────────────────────────────────────────────────────────────
-    p_track = sub.add_parser("track", help="Run real-time PPE + zone tracking on video/webcam")
+    p_track = sub.add_parser("track", help="Run real-time PPE tracking on video/webcam")
     p_track.add_argument("--source", default="0", help="Video file path or camera index (default: 0)")
     p_track.add_argument(
         "--detector",
@@ -84,7 +82,6 @@ def main():
         choices=["grounding-dino", "omdet-turbo"],
         help="Open-vocabulary detector: grounding-dino (max accuracy) or omdet-turbo (faster).",
     )
-    p_track.add_argument("--zones", help="JSON file with restricted zones (see zone_monitor.py for format)")
     p_track.add_argument("--conf", type=float, default=None, help="Detector confidence threshold (default: backend default)")
     p_track.add_argument("--persistence", type=int, default=4, help="Frames needed in window to confirm violation")
     p_track.add_argument("--window", type=int, default=7, help="Sliding window size")

@@ -167,10 +167,13 @@ safety vest" bastano come prompt). Niente più dataset da trovare, niente più G
 Sul video di test entrambi rilevano Person/Helmet/Vest in modo consistente dove la vecchia YOLO
 (mal addestrata) era instabile.
 
-**In più: le aree vietate.** Con l'occasione è entrato il secondo requisito di prodotto — rilevare
-operai dentro **zone proibite**. Non serve un modello: poligoni definiti in JSON + test geometrico
-del **punto-piedi** (proiezione a terra della persona) + la stessa logica di persistenza degli
-alert PPE. Modulo `zone_monitor.py`.
+**In più: le aree vietate (poi accantonate).** Per un periodo è entrato un secondo requisito —
+rilevare operai dentro **zone proibite** con poligoni definiti in JSON + test geometrico del
+**punto-piedi** (modulo `zone_monitor.py`). La feature è stata **rimossa (2026-07-24)**: nei video
+reali non esistono zone definibili come ground truth e l'idea di dedurle da cartelli/segnaletica non
+è realizzabile con un detector (non legge i cartelli né inferisce l'estensione dell'area). Al suo
+posto è stato ampliato il set di controlli PPE: aggiunti **occhiali** (DPI richiesto) e **sigarette**
+(item vietato — violazione se presente).
 
 **Il prezzo.** La latenza su questa CPU resta il nodo: Grounding DINO a ~22 s/frame è utilizzabile
 solo con `skip_frames` alto o in batch; OmDet-Turbo è il ripiego pratico. Su GPU entrambi scendono
@@ -181,8 +184,9 @@ sotto i 200 ms/frame — la scelta del backend è un flag (`--detector`).
 ## 3 · Stato attuale
 
 - **Pipeline completa senza componenti AGPL**: detector open-vocabulary (Apache 2.0, zero-shot)
-  → associazione → identità + memoria PPE → sliding window → **zone vietate** → VLM locale asincrono
-  → video annotato + log JSON.
+  → associazione persona↔oggetti (DPI richiesti + item vietati) → identità + memoria PPE
+  → sliding window → video annotato + log JSON.
+- **Controlli**: DPI richiesti (casco, gilet, occhiali, guanti, scarpe) + item vietati (sigarette).
 - **Zero dipendenze da server esterni**: tutto in-process, tutto in locale, tutto Apache 2.0/BSD/MIT.
 - **Zero training richiesto**: nessun dataset, nessuna GPU per addestrare.
 
@@ -191,8 +195,8 @@ sotto i 200 ms/frame — la scelta del backend è un flag (`--detector`).
 1. **Latenza detection su CPU** — grounding-dino ~22 s/frame, omdet-turbo ~1,5 s/frame. Per il
    real-time vero serve una GPU (entrambi < 200 ms) o un lavoro di ottimizzazione (ONNX export,
    quantizzazione, risoluzione ridotta).
-2. **Glove/Shoe restano difficili** — oggetti piccoli, anche per i detector zero-shot; la memoria
-   PPE + VLM compensano ma la taratura va rifinita sul campo.
+2. **Oggetti piccoli restano difficili** — Glove/Shoe/Glasses/Cigarette, anche per i detector
+   zero-shot; la memoria PPE compensa i DPI, ma la taratura va rifinita sul campo.
 3. **Taratura sensibilità** — memoria PPE + persistenza + skip_frames vanno bilanciate per il caso
    d'uso reale (sorveglianza continua vs clip brevi).
 

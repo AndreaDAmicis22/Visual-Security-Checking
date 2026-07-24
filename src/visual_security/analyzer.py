@@ -42,17 +42,24 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Data models
 # ---------------------------------------------------------------------------
-PPE_LABELS = ["Glove", "Helmet", "Person", "Shoe", "Vest"]
+PPE_LABELS = ["Cigarette", "Glasses", "Glove", "Helmet", "Person", "Shoe", "Vest"]
 
 # Prompt testuali per il detector open-vocabulary -> categoria canonica.
 # Frasi brevi e concrete funzionano meglio delle categorie astratte
 # ("hard hat" > "helmet" per i caschi da cantiere).
+#
+# "Glasses" e' un PPE richiesto (come casco/gilet); "Cigarette" e' invece un
+# item PROIBITO: la sua presenza addosso a una persona e' una violazione (vedi
+# person_ppe_checker.PROHIBITED_ITEMS). Il detector li rileva allo stesso modo,
+# e' il checker a distinguere "manca" da "non deve esserci".
 DETECTION_PROMPTS: dict[str, str] = {
     "a person": "Person",
     "a hard hat": "Helmet",
     "a reflective safety vest": "Vest",
+    "safety glasses": "Glasses",
     "a work glove": "Glove",
     "a work boot": "Shoe",
+    "a cigarette": "Cigarette",
 }
 
 # Parole chiave per riportare il testo matchato dal modello alla categoria
@@ -62,9 +69,12 @@ _KEYWORD_TO_LABEL: list[tuple[str, str]] = [
     ("hard hat", "Helmet"),
     ("helmet", "Helmet"),
     ("vest", "Vest"),
+    ("glasses", "Glasses"),
+    ("goggle", "Glasses"),
     ("glove", "Glove"),
     ("boot", "Shoe"),
     ("shoe", "Shoe"),
+    ("cigarette", "Cigarette"),
 ]
 
 
