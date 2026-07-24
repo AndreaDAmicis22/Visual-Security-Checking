@@ -1,0 +1,262 @@
+{
+  "grounding-dino": {
+    "map50": 0.516,
+    "map30": 0.576,
+    "macro_f1_prod": 0.547,
+    "macro_f1_best": 0.57,
+    "cigarette_det_total": 1302,
+    "cigarette_det_at_prod_thr": 15,
+    "per_class": {
+      "Person": {
+        "ap50": 0.802,
+        "ap30": 0.829,
+        "n_gt": 705,
+        "prod": {
+          "threshold": 0.35,
+          "precision": 0.939,
+          "recall": 0.719,
+          "f1": 0.814,
+          "tp": 507,
+          "fp": 33,
+          "fn": 198
+        },
+        "best_f1": {
+          "threshold": 0.3,
+          "precision": 0.888,
+          "recall": 0.773,
+          "f1": 0.826
+        }
+      },
+      "Helmet": {
+        "ap50": 0.585,
+        "ap30": 0.603,
+        "n_gt": 228,
+        "prod": {
+          "threshold": 0.35,
+          "precision": 0.663,
+          "recall": 0.579,
+          "f1": 0.618,
+          "tp": 132,
+          "fp": 67,
+          "fn": 96
+        },
+        "best_f1": {
+          "threshold": 0.35,
+          "precision": 0.663,
+          "recall": 0.579,
+          "f1": 0.618
+        }
+      },
+      "Vest": {
+        "ap50": 0.475,
+        "ap30": 0.491,
+        "n_gt": 261,
+        "prod": {
+          "threshold": 0.35,
+          "precision": 0.577,
+          "recall": 0.444,
+          "f1": 0.502,
+          "tp": 116,
+          "fp": 85,
+          "fn": 145
+        },
+        "best_f1": {
+          "threshold": 0.3,
+          "precision": 0.535,
+          "recall": 0.498,
+          "f1": 0.516
+        }
+      },
+      "Glasses": {
+        "ap50": 0.504,
+        "ap30": 0.612,
+        "n_gt": 121,
+        "prod": {
+          "threshold": 0.45,
+          "precision": 0.671,
+          "recall": 0.455,
+          "f1": 0.542,
+          "tp": 55,
+          "fp": 27,
+          "fn": 66
+        },
+        "best_f1": {
+          "threshold": 0.35,
+          "precision": 0.566,
+          "recall": 0.57,
+          "f1": 0.568
+        }
+      },
+      "Glove": {
+        "ap50": 0.393,
+        "ap30": 0.478,
+        "n_gt": 256,
+        "prod": {
+          "threshold": 0.35,
+          "precision": 0.502,
+          "recall": 0.414,
+          "f1": 0.454,
+          "tp": 106,
+          "fp": 105,
+          "fn": 150
+        },
+        "best_f1": {
+          "threshold": 0.35,
+          "precision": 0.502,
+          "recall": 0.414,
+          "f1": 0.454
+        }
+      },
+      "Shoe": {
+        "ap50": 0.338,
+        "ap30": 0.445,
+        "n_gt": 414,
+        "prod": {
+          "threshold": 0.35,
+          "precision": 0.77,
+          "recall": 0.227,
+          "f1": 0.351,
+          "tp": 94,
+          "fp": 28,
+          "fn": 320
+        },
+        "best_f1": {
+          "threshold": 0.25,
+          "precision": 0.543,
+          "recall": 0.362,
+          "f1": 0.435
+        }
+      }
+    }
+  },
+  "omdet-turbo": {
+    "map50": 0.482,
+    "map30": 0.555,
+    "macro_f1_prod": 0.508,
+    "macro_f1_best": 0.531,
+    "cigarette_det_total": 2832,
+    "cigarette_det_at_prod_thr": 4,
+    "per_class": {
+      "Person": {
+        "ap50": 0.775,
+        "ap30": 0.811,
+        "n_gt": 705,
+        "prod": {
+          "threshold": 0.3,
+          "precision": 0.877,
+          "recall": 0.705,
+          "f1": 0.781,
+          "tp": 497,
+          "fp": 70,
+          "fn": 208
+        },
+        "best_f1": {
+          "threshold": 0.25,
+          "precision": 0.83,
+          "recall": 0.742,
+          "f1": 0.784
+        }
+      },
+      "Helmet": {
+        "ap50": 0.613,
+        "ap30": 0.65,
+        "n_gt": 228,
+        "prod": {
+          "threshold": 0.3,
+          "precision": 0.536,
+          "recall": 0.654,
+          "f1": 0.589,
+          "tp": 149,
+          "fp": 129,
+          "fn": 79
+        },
+        "best_f1": {
+          "threshold": 0.5,
+          "precision": 0.67,
+          "recall": 0.561,
+          "f1": 0.611
+        }
+      },
+      "Vest": {
+        "ap50": 0.259,
+        "ap30": 0.34,
+        "n_gt": 261,
+        "prod": {
+          "threshold": 0.3,
+          "precision": 0.338,
+          "recall": 0.391,
+          "f1": 0.362,
+          "tp": 102,
+          "fp": 200,
+          "fn": 159
+        },
+        "best_f1": {
+          "threshold": 0.3,
+          "precision": 0.338,
+          "recall": 0.391,
+          "f1": 0.362
+        }
+      },
+      "Glasses": {
+        "ap50": 0.461,
+        "ap30": 0.585,
+        "n_gt": 121,
+        "prod": {
+          "threshold": 0.45,
+          "precision": 0.731,
+          "recall": 0.314,
+          "f1": 0.439,
+          "tp": 38,
+          "fp": 14,
+          "fn": 83
+        },
+        "best_f1": {
+          "threshold": 0.35,
+          "precision": 0.581,
+          "recall": 0.446,
+          "f1": 0.505
+        }
+      },
+      "Glove": {
+        "ap50": 0.392,
+        "ap30": 0.452,
+        "n_gt": 256,
+        "prod": {
+          "threshold": 0.3,
+          "precision": 0.54,
+          "recall": 0.398,
+          "f1": 0.458,
+          "tp": 102,
+          "fp": 87,
+          "fn": 154
+        },
+        "best_f1": {
+          "threshold": 0.3,
+          "precision": 0.54,
+          "recall": 0.398,
+          "f1": 0.458
+        }
+      },
+      "Shoe": {
+        "ap50": 0.392,
+        "ap30": 0.495,
+        "n_gt": 414,
+        "prod": {
+          "threshold": 0.3,
+          "precision": 0.385,
+          "recall": 0.464,
+          "f1": 0.421,
+          "tp": 192,
+          "fp": 307,
+          "fn": 222
+        },
+        "best_f1": {
+          "threshold": 0.4,
+          "precision": 0.556,
+          "recall": 0.399,
+          "f1": 0.464
+        }
+      }
+    }
+  }
+}

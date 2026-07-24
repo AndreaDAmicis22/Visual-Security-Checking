@@ -111,9 +111,12 @@ hardware esegui `benchmark_tracker.ipynb`.
 Confronto quantitativo dei due detector su dataset etichettato (accuratezza) e
 su video (comportamento temporale) in **[evaluation/REPORT.md](evaluation/REPORT.md)**.
 
-In sintesi (subset bilanciato di 259 immagini SH17, IoU 0.5, soglie di produzione):
+In sintesi (subset bilanciato di 259 immagini SH17):
 
-| | macro-F1 | FPS effettivi (CPU) | Nota |
-|---|---|---|---|
-| Grounding DINO | **0.576** | 0.59 | più accurato, per analisi offline/GPU |
-| OmDet-Turbo | 0.508 | **5.05** | ~8.6× più veloce, per live su CPU |
+| | mAP@.5 | mAP@.3 | FPS effettivi (CPU) | Nota |
+|---|---|---|---|---|
+| Grounding DINO | **0.516** | **0.576** | 0.59 | più accurato, per analisi offline/GPU |
+| OmDet-Turbo | 0.482 | 0.555 | **5.05** | ~8.6× più veloce, per live su CPU |
+
+Cuore del sistema solido (Person AP@.5 ~0.80); il calo è su oggetti PPE piccoli
+(guanti/scarpe/occhiali), limite atteso dello zero-shot senza fine-tuning.

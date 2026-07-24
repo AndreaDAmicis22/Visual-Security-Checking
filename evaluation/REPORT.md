@@ -11,12 +11,14 @@ Data: 2026-07-24 · Hardware: CPU-only (Intel Iris Xe, 16 GB) · IoU match = 0.5
 
 ## 1. Verdetto
 
-- **Grounding DINO è globalmente più accurato** (macro-F1 **0.576** vs 0.508; precisione più alta su quasi tutte le classi), ma **~6-9× più lento**.
-- **OmDet-Turbo è l'unico praticabile in near-real-time su CPU** (5.0 FPS vs 0.6 FPS), a costo di più falsi positivi (precisione più bassa, specie Vest e Shoe).
+- **Grounding DINO è globalmente più accurato** (mAP@.5 **0.516** vs 0.482; precisione più alta su Person/Vest/Glasses), ma **~6-9× più lento**.
+- **OmDet-Turbo è l'unico praticabile in near-real-time su CPU** (5.0 FPS vs 0.6 FPS), leggermente migliore su Helmet/Shoe ma con più falsi positivi (precisione più bassa, specie Vest).
+- **Le metriche sono modeste ma oneste**: il cuore del sistema (rilevare gli operai) è solido (Person AP@.5 ~0.80); il calo è su guanti/scarpe/gilet/occhiali — oggetti piccoli, difficili in **zero-shot senza training**. Non è un artefatto delle soglie (ottimizzarle dà solo +2 punti F1). Vedi §3 per la scomposizione.
 
 **Raccomandazione operativa:**
 - **Analisi offline / massima accuratezza / GPU** → **Grounding DINO**.
 - **Sorveglianza live su CPU / throughput** → **OmDet-Turbo**, tenendo la sliding-window + i check geometrici a valle per contenere i falsi positivi.
+- **Per migliorare davvero le PPE-class piccole** servirebbe un fine-tuning leggero (o soglie/IoU tarati per classe): lo zero-shot puro ha un tetto su guanti/scarpe.
 
 ---
 
@@ -51,36 +53,63 @@ Copre **6 delle nostre 7 classi** (manca solo *Cigarette*, assente in ogni datas
 
 ---
 
-## 3. Valutazione statica (259 immagini, IoU ≥ 0.5)
+## 3. Valutazione statica (259 immagini)
 
-### Grounding DINO — macro-F1 **0.576** · micro-F1 **0.63**
+Metriche calcolate su detection grezze catturate a soglia bassa (`eval_capture.py`)
+e ricalcolate offline (`eval_metrics.py`), così da riportare metriche indipendenti
+dalla soglia (**AP/mAP**) accanto al punto operativo:
+- **AP@.5 / AP@.3**: average precision (area sotto la curva P-R), a IoU 0.5 e 0.3.
+  Indipendente dalla soglia → qualità "intrinseca" del detector.
+- **F1 prod**: F1 al punto operativo di *produzione* (soglie dei video: base 0.35 GD /
+  0.30 OmDet, Glasses 0.45).
+- **F1 best**: F1 massimo ottenibile variando la sola soglia (+ soglia che lo realizza).
 
-| Classe | Precision | Recall | F1 | TP | FP | FN |
-|---|---|---|---|---|---|---|
-| Person | 0.94 | 0.72 | **0.81** | 507 | 32 | 198 |
-| Helmet | 0.69 | 0.58 | **0.63** | 132 | 58 | 96 |
-| Glasses | 0.67 | 0.46 | **0.55** | 56 | 28 | 65 |
-| Vest | 0.59 | 0.45 | **0.51** | 117 | 81 | 144 |
-| Glove | 0.64 | 0.43 | **0.51** | 110 | 63 | 146 |
-| Shoe | 0.80 | 0.30 | **0.44** | 126 | 31 | 288 |
+### Grounding DINO — **mAP@.5 = 0.516** · mAP@.3 = 0.576 · macro-F1(prod) = 0.547
 
-### OmDet-Turbo — macro-F1 **0.508** · micro-F1 **0.558**
+| Classe | AP@.5 | AP@.3 | F1 prod (P/R) | F1 best @soglia (P/R) |
+|---|---|---|---|---|
+| Person | 0.80 | 0.83 | **0.81** (0.94/0.72) | 0.83 @0.30 (0.89/0.77) |
+| Helmet | 0.59 | 0.60 | **0.62** (0.66/0.58) | 0.62 @0.35 (0.66/0.58) |
+| Glasses | 0.50 | 0.61 | **0.54** (0.67/0.46) | 0.57 @0.35 (0.57/0.57) |
+| Vest | 0.48 | 0.49 | **0.50** (0.58/0.44) | 0.52 @0.30 (0.54/0.50) |
+| Glove | 0.39 | 0.48 | **0.45** (0.50/0.41) | 0.45 @0.35 (0.50/0.41) |
+| Shoe | 0.34 | 0.45 | **0.35** (0.77/0.23) | 0.43 @0.25 (0.54/0.36) |
 
-| Classe | Precision | Recall | F1 | TP | FP | FN |
-|---|---|---|---|---|---|---|
-| Person | 0.88 | 0.70 | **0.78** | 497 | 70 | 208 |
-| Helmet | 0.54 | 0.65 | **0.59** | 149 | 129 | 79 |
-| Glove | 0.54 | 0.40 | **0.46** | 102 | 87 | 154 |
-| Glasses | 0.73 | 0.31 | **0.44** | 38 | 14 | 83 |
-| Shoe | 0.39 | 0.46 | **0.42** | 192 | 307 | 222 |
-| Vest | 0.34 | 0.39 | **0.36** | 102 | 200 | 159 |
+### OmDet-Turbo — **mAP@.5 = 0.482** · mAP@.3 = 0.555 · macro-F1(prod) = 0.508
 
-### Lettura
-- **Person**: entrambi affidabili (F1 ~0.8). Recall ~0.7 perché SH17 annota anche persone molto piccole/parziali sullo sfondo che il detector a soglia 0.35 non prende.
-- **Helmet/Vest**: GD nettamente più preciso (Vest P 0.59 vs 0.34; Helmet P 0.69 vs 0.54). OmDet recupera qualche recall in più ma con molti FP (Vest 200 FP, Shoe 307 FP).
-- **Shoe**: recall basso per entrambi (GD 0.30) — scarpe piccole, spesso occluse/parziali; GD compensa con precisione alta (0.80).
-- **Glasses**: buona precisione (0.67–0.73), recall basso — c'è un *domain gap* (SH17 annota occhiali generici/da vista, il prompt è "safety glasses").
-- **Cigarette (proxy FP)**: SH17 non annota sigarette → non calcolabile P/R. Detection "Cigarette" spurie a livello grezzo: **GD 18, OmDet 4**. ⚠️ Sono conteggi *detection-level*: in questo test **non** sono applicati i check geometrici di plausibilità (richiedono l'associazione alla persona); nel pipeline video quei check + la persistenza li avevano azzerati.
+| Classe | AP@.5 | AP@.3 | F1 prod (P/R) | F1 best @soglia (P/R) |
+|---|---|---|---|---|
+| Person | 0.78 | 0.81 | **0.78** (0.88/0.70) | 0.78 @0.25 (0.83/0.74) |
+| Helmet | 0.61 | 0.65 | **0.59** (0.54/0.65) | 0.61 @0.50 (0.67/0.56) |
+| Glasses | 0.46 | 0.59 | **0.44** (0.73/0.31) | 0.51 @0.35 (0.58/0.45) |
+| Glove | 0.39 | 0.45 | **0.46** (0.54/0.40) | 0.46 @0.30 (0.54/0.40) |
+| Shoe | 0.39 | 0.50 | **0.42** (0.39/0.46) | 0.46 @0.40 (0.56/0.40) |
+| Vest | 0.26 | 0.34 | **0.36** (0.34/0.39) | 0.36 @0.30 (0.34/0.39) |
+
+### Lettura (onesta) — perché i numeri sono modesti
+Tre fattori, quantificati:
+
+1. **Difficoltà intrinseca dello zero-shot su oggetti piccoli** — è la causa *principale*.
+   Person è solido (AP@.5 ~0.80: il cuore del sistema — trovare gli operai — funziona),
+   ma guanti/scarpe/gilet (piccoli, in coppia, spesso parziali) stanno a AP 0.26–0.48.
+   Nessun training PPE → limite atteso.
+2. **Severità dell'IoU** — moderata. mAP@.3 è ~6 punti sopra mAP@.5 (GD 0.576 vs 0.516):
+   molti box sono "quasi giusti" ma non centrano l'IoU 0.5, specie sugli oggetti piccoli
+   (Shoe AP .34→.45, Glasses .50→.61). Per una detection di sicurezza grossolana, IoU 0.3
+   è più rappresentativo.
+3. **Soglia di produzione** — impatto *piccolo*, contrariamente a quanto ipotizzato all'inizio:
+   il macro-F1 al punto operativo (0.547) è a solo ~2 punti dal massimo ottenibile ottimizzando
+   la soglia (0.57). L'unica classe che ne soffre davvero è **Shoe** (F1 0.35→0.43 abbassando
+   la soglia a 0.25). Quindi le soglie alte tarate sui video **non** stanno "rovinando" il recall
+   in modo drammatico: i numeri sono quelli reali dello zero-shot.
+
+**Confronto detector**: GD ha mAP più alto su Person, Vest, Glasses; OmDet è leggermente
+migliore su Helmet e Shoe. Nel complesso **GD > OmDet** (mAP@.5 0.516 vs 0.482).
+
+- **Cigarette (proxy FP)**: SH17 non annota sigarette → non calcolabile P/R. Detection grezze
+  a soglia 0.05: **GD 1302, OmDet 2832** su 259 immagini; alla soglia di produzione 0.50 scendono
+  a **GD 15, OmDet 4**. ⚠️ Conteggi *detection-level*: i check geometrici di plausibilità (che
+  nei video avevano azzerato i FP) **non** sono applicati qui → sovrastimano i FP del pipeline reale.
 
 ---
 
@@ -108,7 +137,7 @@ Copre **6 delle nostre 7 classi** (manca solo *Cigarette*, assente in ogni datas
 
 ## 5. Limiti e note metodologiche (onestà sui numeri)
 
-- **Metrica al punto operativo, non mAP**: P/R/F1 sono misurati alle soglie di *produzione* (quelle dei video). Riflettono la resa del sistema così com'è configurato, non la qualità intrinseca a soglia variabile (mAP). Un confronto mAP@[.5:.95] richiederebbe di rieseguire a soglia bassa (raddoppiando i tempi di GD).
+- **AP a IoU singolo, non COCO mAP@[.5:.95]**: si riportano AP@.5 e AP@.3 (più informativi per detection di sicurezza grossolana) ma non la media COCO su 10 soglie IoU; sarebbe più severa e non aggiungerebbe molto al confronto relativo tra i due modelli.
 - **Check geometrici non applicati nella statica**: i filtri di plausibilità (occhiali in fascia-volto, dimensione/larghezza sigaretta) sono logica di *sistema* a valle (richiedono l'associazione persona↔oggetto) e non sono attivi in questo test detection-level. Quindi i FP statici (specie Cigarette) sovrastimano quelli del pipeline completo.
 - **Domain gap classi**: "safety glasses"/"work glove"/"work boot" (prompt) vs occhiali/guanti/scarpe generici (annotazioni SH17) penalizzano il recall — un limite dello zero-shot, non necessariamente del modello.
 - **Recall Person < 1**: SH17 etichetta persone minuscole/di sfondo che la soglia 0.35 scarta; non è un errore grave per il caso d'uso (sicurezza sugli operai in primo piano).
@@ -121,24 +150,32 @@ Copre **6 delle nostre 7 classi** (manca solo *Cigarette*, assente in ogni datas
 
 ```
 evaluation/
-├── REPORT.md                      # questo report
-├── build_subset.py                # costruzione subset bilanciato SH17 (riproducibile, seed 42)
-├── eval_static.py                 # valutazione statica P/R/F1
-├── temporal_stats.py              # statistiche temporali sui video
-├── eval_static_results.json       # risultati statici (per-classe, macro/micro, latenza)
-├── temporal_stats_results.json    # risultati temporali (FPS, latenza, track, alert)
+├── REPORT.md                        # questo report
+├── build_subset.py                  # costruzione subset bilanciato SH17 (riproducibile, seed 42)
+├── eval_static.py                   # valutazione statica P/R/F1 al punto operativo (soglie di produzione)
+├── eval_capture.py                  # cattura detection grezze (soglia bassa, filtro per-classe off)
+├── eval_metrics.py                  # metriche offline dal dump: mAP@.5/.3, F1 prod vs best, sweep soglia
+├── temporal_stats.py                # statistiche temporali sui video
+├── eval_static_results.json         # risultati statici al punto operativo
+├── eval_metrics_results.json        # mAP + F1 prod/best per-classe (analisi principale)
+├── temporal_stats_results.json      # risultati temporali (FPS, latenza, track, alert)
+├── raw_detections_*.json            # dump detection grezze per detector (per ri-analisi offline)
 ├── sh17_subset/
-│   ├── images/                    # 259 immagini del subset (SH17, CC BY 4.0)
-│   └── ground_truth.json          # GT rimappata sulle nostre 6 classi
-├── sh17_meta/                     # cache download annotazioni COCO (eliminabile)
-└── verify/                        # crop usati per verificare la mappatura classi
+│   ├── images/                      # 259 immagini del subset (SH17, CC BY 4.0) [gitignored]
+│   └── ground_truth.json            # GT rimappata sulle nostre 6 classi
+├── sh17_meta/                       # cache download annotazioni COCO (eliminabile) [gitignored]
+└── verify/                          # crop verifica classi + montaggio predizioni [gitignored]
 ```
 
 ### Riproducibilità
 ```bash
 python evaluation/build_subset.py      # ricostruisce il subset (serve HF_TOKEN nel .env)
-python evaluation/eval_static.py       # valutazione statica (GD ~40min, OmDet ~6min su CPU)
+python evaluation/eval_capture.py      # cattura detection grezze (GD ~40min, OmDet ~6min su CPU)
+python evaluation/eval_metrics.py      # metriche offline dal dump (istantaneo)
+python evaluation/eval_static.py       # (opz.) P/R/F1 diretto al punto operativo
 python evaluation/temporal_stats.py    # statistiche temporali sui video
 ```
+
+Il montaggio qualitativo **GT vs Grounding DINO vs OmDet** è in `evaluation/verify/predictions_montage.jpg`.
 
 **Attribuzione dataset**: SH17 — https://universe.roboflow.com/safety-measure/sh17-dataset — licenza CC BY 4.0.
