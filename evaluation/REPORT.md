@@ -14,6 +14,7 @@ Data: 2026-07-24 · Hardware: CPU-only (Intel Iris Xe, 16 GB) · IoU match = 0.5
 - **Grounding DINO è globalmente più accurato** (mAP@.5 **0.516** vs 0.482; precisione più alta su Person/Vest/Glasses), ma **~6-9× più lento**.
 - **OmDet-Turbo è l'unico praticabile in near-real-time su CPU** (5.0 FPS vs 0.6 FPS), leggermente migliore su Helmet/Shoe ma con più falsi positivi (precisione più bassa, specie Vest).
 - **Le metriche sono modeste ma oneste**: il cuore del sistema (rilevare gli operai) è solido (Person AP@.5 ~0.80); il calo è su guanti/scarpe/gilet/occhiali — oggetti piccoli, difficili in **zero-shot senza training**. Non è un artefatto delle soglie (ottimizzarle dà solo +2 punti F1). Vedi §3 per la scomposizione.
+- **Miglioramento trovato (§5): OWLv2 e l'ensemble.** OWLv2 (Apache 2.0) è più accurato di GD/OmDet (mAP@.5 **0.583** vs 0.519), meglio su casco/gilet/guanti, debole solo sugli occhiali. L'**ensemble OWLv2 + GD(occhiali)** è il migliore in assoluto: **mAP@.5 0.629** (+21% sul GD baseline), coprendo anche gli occhiali. Prompt multi-sinonimo e SAHI invece non aiutano.
 
 **Raccomandazione operativa:**
 - **Analisi offline / massima accuratezza / GPU** → **Grounding DINO**.
@@ -152,7 +153,62 @@ alzare le metriche — quelle sono limitate dalla difficoltà zero-shot sugli og
 
 ---
 
-## 5. Limiti e note metodologiche (onestà sui numeri)
+## 5. Esperimenti di miglioramento metriche (Tier 1/2)
+
+Provate più strade per alzare le metriche, misurate offline sullo stesso subset (NMS attiva su
+tutte). Script: `eval_experiments.py` (cattura), `eval_compare.py` (confronto); dati in
+`eval_experiments_results.json`.
+
+| Variante | mAP@.5 | mAP@.3 | macro-F1 (soglia ottimale) |
+|---|---|---|---|
+| GD baseline | 0.519 | 0.586 | 0.577 |
+| GD + prompt multi-sinonimo | 0.521 | 0.580 | 0.598 |
+| OmDet baseline | 0.482 | 0.555 | 0.531 |
+| OmDet + prompt multi-sinonimo | 0.476 | 0.546 | 0.528 |
+| OmDet + SAHI (tiling) | 0.406 | 0.476 | 0.483 |
+| OWLv2 (backend alternativo, Apache 2.0) | 0.583 | 0.626 | 0.622 |
+| **🏆 Ensemble OWLv2 + GD (occhiali)** | **0.629** | **0.683** | — † |
+
+† F1 "a soglia" non riportata per l'ensemble: i due detector hanno scale di score
+diverse, la F1 al punto operativo richiede soglie per-detector (l'AP, indipendente
+dalla soglia, è il confronto pulito).
+
+**AP@.5 per classe** (le più significative):
+
+| Variante | Person | Helmet | Vest | Glasses | Glove | Shoe |
+|---|---|---|---|---|---|---|
+| GD baseline | 0.81 | 0.59 | 0.48 | 0.50 | 0.40 | 0.34 |
+| GD multi-sinonimo | 0.79 | 0.52 | 0.49 | 0.44 | 0.33 | **0.55** |
+| OWLv2 | 0.79 | **0.75** | **0.65** | 0.23 | **0.63** | 0.44 |
+| **Ensemble** | 0.79 | **0.75** | **0.65** | **0.50** | **0.63** | 0.44 |
+
+Esiti:
+- **OWLv2 vince** ⭐ — mAP@.5 **0.583** (+0.064 su GD) e il **miglior F1** (0.622). Apache 2.0,
+  ~5.8 s/img (tra OmDet e GD). Molto meglio su Helmet, Vest, Glove; **debole su Glasses (AP 0.23)**.
+  L'F1 al punto operativo *attuale* è basso (0.467) solo perché le soglie erano tarate per GD/OmDet:
+  con soglie ri-tarate per OWLv2 (≈ Person 0.15, Helmet 0.35, Vest 0.30, Glove 0.25, Shoe 0.15) è il migliore.
+- **Prompt multi-sinonimo**: effetto marginale e *ridistributivo*. Su GD +0.02 F1 (grosso guadagno
+  solo su Shoe: AP 0.34→0.55); su OmDet neutro/negativo. Non un chiaro miglioramento netto.
+- **SAHI (tiling)**: **peggiora** (mAP 0.48→0.41). Su immagini già piccole (640px) il tiling spezza
+  gli oggetti grandi → la detection di Person crolla (AP 0.78→0.40). Utile su immagini grandi, non qui.
+- **MM-Grounding-DINO**: non valutato — richiede lo stack mmdetection/mmcv, non installabile in modo
+  affidabile su questo ambiente Windows/CPU.
+
+- **Ensemble OWLv2 + Grounding DINO (occhiali)** ⭐⭐ — la configurazione migliore: OWLv2 per tutte
+  le classi + GD solo per gli occhiali (la sua debolezza). **mAP@.5 0.629** (Glasses AP 0.23→0.50,
+  il resto invariato). Rispetto al punto di partenza GD baseline: **+0.11 mAP (+21% relativo)**.
+  Costo: somma delle due inferenze (~15 s/img su CPU) → accuracy-first, non real-time.
+  Disponibile come `build_detector("ensemble")`.
+
+**Conclusione**: la leva che sposta davvero le metriche è **cambiare detector**: OWLv2 (Apache 2.0,
+stessa licenza) è più accurato di GD/OmDet su quasi tutte le classi PPE; l'**ensemble OWLv2+GD**
+copre anche gli occhiali e porta l'mAP@.5 a **0.629**. Prompt multi-sinonimo e SAHI non aiutano.
+OWLv2 ha soglie per-classe proprie (`OWLV2_CONF`, provvisorie per il video). Per un ulteriore salto
+resterebbe il fine-tuning (GPU).
+
+---
+
+## 6. Limiti e note metodologiche (onestà sui numeri)
 
 - **AP a IoU singolo, non COCO mAP@[.5:.95]**: si riportano AP@.5 e AP@.3 (più informativi per detection di sicurezza grossolana) ma non la media COCO su 10 soglie IoU; sarebbe più severa e non aggiungerebbe molto al confronto relativo tra i due modelli.
 - **Check geometrici non applicati nella statica**: i filtri di plausibilità (occhiali in fascia-volto, dimensione/larghezza sigaretta) sono logica di *sistema* a valle (richiedono l'associazione persona↔oggetto) e non sono attivi in questo test detection-level. Quindi i FP statici (specie Cigarette) sovrastimano quelli del pipeline completo.
@@ -163,7 +219,7 @@ alzare le metriche — quelle sono limitate dalla difficoltà zero-shot sugli og
 
 ---
 
-## 6. File prodotti
+## 7. File prodotti
 
 ```
 evaluation/
@@ -172,11 +228,15 @@ evaluation/
 ├── eval_static.py                   # valutazione statica P/R/F1 al punto operativo (soglie di produzione)
 ├── eval_capture.py                  # cattura detection grezze (soglia bassa, filtro per-classe off)
 ├── eval_metrics.py                  # metriche offline dal dump: mAP@.5/.3, F1 prod vs best, sweep soglia
+├── eval_experiments.py              # cattura varianti Tier 1/2 (multi-sinonimo, SAHI, OWLv2)
+├── eval_compare.py                  # confronto mAP di tutte le varianti (offline)
+├── sahi_infer.py                    # helper SAHI (inferenza a tile)
 ├── temporal_stats.py                # statistiche temporali sui video
 ├── eval_static_results.json         # risultati statici al punto operativo
-├── eval_metrics_results.json        # mAP + F1 prod/best per-classe (analisi principale)
+├── eval_metrics_results.json        # mAP + F1 prod/best per-classe (baseline, no_nms/nms)
+├── eval_experiments_results.json    # mAP delle varianti Tier 1/2 (OWLv2 vince)
 ├── temporal_stats_results.json      # risultati temporali (FPS, latenza, track, alert)
-├── raw_detections_*.json            # dump detection grezze per detector (per ri-analisi offline)
+├── raw_detections_*.json            # dump detection grezze per variante (per ri-analisi offline)
 ├── sh17_subset/
 │   ├── images/                      # 259 immagini del subset (SH17, CC BY 4.0) [gitignored]
 │   └── ground_truth.json            # GT rimappata sulle nostre 6 classi
@@ -189,6 +249,8 @@ evaluation/
 python evaluation/build_subset.py      # ricostruisce il subset (serve HF_TOKEN nel .env)
 python evaluation/eval_capture.py      # cattura detection grezze (GD ~40min, OmDet ~6min su CPU)
 python evaluation/eval_metrics.py      # metriche offline dal dump (istantaneo)
+python evaluation/eval_experiments.py  # cattura varianti Tier 1/2 (~1.5h su CPU)
+python evaluation/eval_compare.py      # confronto mAP di tutte le varianti (istantaneo)
 python evaluation/eval_static.py       # (opz.) P/R/F1 diretto al punto operativo
 python evaluation/temporal_stats.py    # statistiche temporali sui video
 ```
