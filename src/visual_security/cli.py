@@ -79,8 +79,9 @@ def main():
     p_track.add_argument(
         "--detector",
         default="grounding-dino",
-        choices=["grounding-dino", "omdet-turbo"],
-        help="Open-vocabulary detector: grounding-dino (max accuracy) or omdet-turbo (faster).",
+        choices=["grounding-dino", "omdet-turbo", "owlv2", "ensemble"],
+        help="Detector open-vocabulary: grounding-dino (max accuracy), omdet-turbo (fast), "
+        "owlv2 (miglior mAP su PPE), ensemble (owlv2 + grounding-dino sugli occhiali).",
     )
     p_track.add_argument("--conf", type=float, default=None, help="Detector confidence threshold (default: backend default)")
     p_track.add_argument("--persistence", type=int, default=4, help="Frames needed in window to confirm violation")

@@ -236,3 +236,7 @@ benchmark_data/**
 evaluation/sh17_meta/
 evaluation/sh17_subset/images/
 evaluation/verify/
+# Dump detection degli esperimenti (grandi, rigenerabili con eval_experiments.py);
+# i *_results.json e gli script restano versionati. I due dump baseline gia'
+# tracciati non vengono rimossi da questa regola.
+evaluation/raw_detections_*.json

@@ -20,7 +20,7 @@ from visual_security.person_ppe_checker import _iou  # noqa: E402
 
 EVAL = ["Person", "Helmet", "Vest", "Glasses", "Glove", "Shoe"]
 DETECTORS = ["grounding-dino", "omdet-turbo"]
-BASE_THR = {"grounding-dino": 0.35, "omdet-turbo": 0.30}
+BASE_THR = {"grounding-dino": 0.35, "omdet-turbo": 0.30, "owlv2": 0.10}
 PERCLASS_THR = {"Glasses": 0.45, "Cigarette": 0.50}
 IOUS = [0.5, 0.3]
 SWEEP = [i / 100 for i in range(5, 96, 5)]
@@ -95,7 +95,7 @@ def prf_at(confs, tps, total_gt, t):
     return round(p, 3), round(r, 3), round(f1, 3), tp, fp, fn
 
 
-def compute(name, raw):
+def compute(raw, base_thr):
     per_class = {}
     cig_all = sum(1 for v in raw.values() for d in v if d[0] == "Cigarette")
     cig_prod = sum(1 for v in raw.values() for d in v if d[0] == "Cigarette" and d[5] >= PERCLASS_THR["Cigarette"])
@@ -104,7 +104,7 @@ def compute(name, raw):
         preds_by_img = {f: [(d[5], d[1:5]) for d in dets if d[0] == cls] for f, dets in raw.items()}
         ap50, confs, tps, tot = eval_class(preds_by_img, gt_img, 0.5)
         ap30, _, _, _ = eval_class(preds_by_img, gt_img, 0.3)
-        pth = PERCLASS_THR.get(cls, BASE_THR[name])
+        pth = PERCLASS_THR.get(cls, base_thr)
         p, r, f1, tp, fp, fn = prf_at(confs, tps, tot, pth)
         best = max(((prf_at(confs, tps, tot, t), t) for t in SWEEP), key=lambda z: z[0][2])
         (bp, br, bf1, *_), bt = best
@@ -128,34 +128,36 @@ def compute(name, raw):
 # Calcola ogni detector in due varianti: detection grezze e con NMS per-classe
 # (IoU 0.5) applicata offline sugli stessi dump -> mostra l'effetto della NMS
 # senza rieseguire i modelli.
-results = {}
-for name in DETECTORS:
-    raw0 = json.load(open(SUB.parent / f"raw_detections_{name}.json"))
-    results[name] = {
-        "no_nms": compute(name, raw0),
-        "nms": compute(name, {f: nms_raw(dets, 0.5) for f, dets in raw0.items()}),
-    }
+def main():
+    results = {}
+    for name in DETECTORS:
+        raw0 = json.load(open(SUB.parent / f"raw_detections_{name}.json"))
+        results[name] = {
+            "no_nms": compute(raw0, BASE_THR[name]),
+            "nms": compute({f: nms_raw(dets, 0.5) for f, dets in raw0.items()}, BASE_THR[name]),
+        }
+    json.dump(results, open("evaluation/eval_metrics_results.json", "w"), indent=2)
+    for name in DETECTORS:
+        for variant in ["no_nms", "nms"]:
+            R = results[name][variant]
+            tag = "senza NMS" if variant == "no_nms" else "con NMS  "
+            print(f"\n{'=' * 78}\n{name} [{tag}]  |  mAP@0.5={R['map50']}  mAP@0.3={R['map30']}  "
+                  f"macroF1(prod)={R['macro_f1_prod']}\n{'=' * 78}")
+            print(f"{'classe':9} {'AP@.5':>6} {'AP@.3':>6} | {'F1 prod':>8} (P/R)")
+            for c in EVAL:
+                v = R["per_class"][c]; pr = v["prod"]
+                print(f"{c:9} {v['ap50']:>6.3f} {v['ap30']:>6.3f} | "
+                      f"{pr['f1']:>8.2f} ({pr['precision']:.2f}/{pr['recall']:.2f})")
+            print(f"Cigarette (no GT): {R['cigarette_det_total']} det, "
+                  f"{R['cigarette_det_at_prod_thr']} a soglia >= {PERCLASS_THR['Cigarette']}")
 
-json.dump(results, open("evaluation/eval_metrics_results.json", "w"), indent=2)
+    print(f"\n{'=' * 78}\nEFFETTO NMS (delta mAP@.5 / macroF1 prod)\n{'=' * 78}")
+    for name in DETECTORS:
+        a, b = results[name]["no_nms"], results[name]["nms"]
+        print(f"{name:16} mAP@.5 {a['map50']:.3f} -> {b['map50']:.3f} ({b['map50'] - a['map50']:+.3f})   "
+              f"macroF1 {a['macro_f1_prod']:.3f} -> {b['macro_f1_prod']:.3f} ({b['macro_f1_prod'] - a['macro_f1_prod']:+.3f})")
+    print("\nSalvato evaluation/eval_metrics_results.json")
 
-# ── stampa leggibile ────────────────────────────────────────────────────────
-for name in DETECTORS:
-    for variant in ["no_nms", "nms"]:
-        R = results[name][variant]
-        tag = "senza NMS" if variant == "no_nms" else "con NMS  "
-        print(f"\n{'=' * 78}\n{name} [{tag}]  |  mAP@0.5={R['map50']}  mAP@0.3={R['map30']}  "
-              f"macroF1(prod)={R['macro_f1_prod']}\n{'=' * 78}")
-        print(f"{'classe':9} {'AP@.5':>6} {'AP@.3':>6} | {'F1 prod':>8} (P/R)")
-        for c in EVAL:
-            v = R["per_class"][c]; pr = v["prod"]
-            print(f"{c:9} {v['ap50']:>6.3f} {v['ap30']:>6.3f} | "
-                  f"{pr['f1']:>8.2f} ({pr['precision']:.2f}/{pr['recall']:.2f})")
-        print(f"Cigarette (no GT): {R['cigarette_det_total']} det, "
-              f"{R['cigarette_det_at_prod_thr']} a soglia >= {PERCLASS_THR['Cigarette']}")
 
-print(f"\n{'=' * 78}\nEFFETTO NMS (delta mAP@.5 / macroF1 prod)\n{'=' * 78}")
-for name in DETECTORS:
-    a, b = results[name]["no_nms"], results[name]["nms"]
-    print(f"{name:16} mAP@.5 {a['map50']:.3f} -> {b['map50']:.3f} ({b['map50'] - a['map50']:+.3f})   "
-          f"macroF1 {a['macro_f1_prod']:.3f} -> {b['macro_f1_prod']:.3f} ({b['macro_f1_prod'] - a['macro_f1_prod']:+.3f})")
-print("\nSalvato evaluation/eval_metrics_results.json")
+if __name__ == "__main__":
+    main()

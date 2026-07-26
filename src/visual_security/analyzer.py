@@ -77,6 +77,20 @@ DETECTION_CONF: dict[str, float] = {
     "Cigarette": 0.50,
 }
 
+# OWLv2 usa score sigmoidi su una scala DIVERSA da Grounding DINO/OmDet, quindi
+# ha soglie per-classe proprie. Valori derivati dallo sweep F1 su SH17 (vedi
+# evaluation/REPORT.md). NB: provvisori per il video — non ancora tarati sui
+# falsi positivi di un video reale come per gli altri due backend.
+OWLV2_CONF: dict[str, float] = {
+    "Person": 0.15,
+    "Helmet": 0.35,
+    "Vest": 0.30,
+    "Glasses": 0.30,
+    "Glove": 0.25,
+    "Shoe": 0.15,
+    "Cigarette": 0.35,
+}
+
 # Parole chiave per riportare il testo matchato dal modello alla categoria
 # canonica (Grounding DINO puo' restituire sotto-frasi del prompt).
 _KEYWORD_TO_LABEL: list[tuple[str, str]] = [
@@ -387,10 +401,104 @@ class OmDetTurboAnalyzer(_OpenVocabAnalyzer):
         return nms_per_class(detections, self.nms_iou) if self.nms_iou and self.nms_iou > 0 else detections
 
 
+class Owlv2Analyzer(_OpenVocabAnalyzer):
+    """
+    Zero-shot detection con OWLv2 (google/owlv2, Apache 2.0, nativo transformers).
+
+    Alternativa a Grounding DINO/OmDet valutata nel benchmark: quasi pari a
+    Grounding DINO in accuratezza zero-shot con meno calcolo. I "text queries"
+    sono le frasi dei prompt; le label dei risultati sono indici in quella lista.
+    Gli score sono sigmoidi (bassi): la soglia di default e' piu' bassa (0.10).
+    """
+
+    def __init__(
+        self,
+        model_id: str = "google/owlv2-base-patch16-ensemble",
+        conf_threshold: float = 0.10,
+        prompts: dict[str, str] | None = None,
+        device: str | None = None,
+        class_conf: dict[str, float] | None = None,
+    ):
+        # Default alle soglie per-classe di OWLv2 (scala score diversa).
+        super().__init__(
+            "OWLv2", model_id, conf_threshold, prompts, device,
+            class_conf=class_conf if class_conf is not None else dict(OWLV2_CONF),
+        )
+
+    def _load(self) -> None:
+        if self._model is not None:
+            return
+        import torch
+        from transformers import Owlv2ForObjectDetection, Owlv2Processor
+
+        device = self._resolve_device()
+        dtype = torch.bfloat16 if device == "cuda" else torch.float32
+        self._processor = Owlv2Processor.from_pretrained(self.model_id)
+        self._model = Owlv2ForObjectDetection.from_pretrained(self.model_id, dtype=dtype).to(device).eval()
+        self._classes = list(self.prompts)
+
+    def _run_inference(self, image_source: str | np.ndarray) -> list[Detection]:
+        import torch
+
+        self._load()
+        img = self._to_bgr(image_source)
+        pil = self._to_pil(img)
+
+        inputs = self._processor(text=[self._classes], images=pil, return_tensors="pt").to(self._model.device)
+        with torch.no_grad():
+            outputs = self._model(**inputs)
+
+        target_sizes = torch.tensor([pil.size[::-1]], device=self._model.device)  # (h, w)
+        # La firma del post-processing e' cambiata tra versioni di transformers.
+        try:
+            results = self._processor.post_process_grounded_object_detection(
+                outputs=outputs, target_sizes=target_sizes, threshold=self.conf_threshold
+            )[0]
+        except (TypeError, AttributeError):
+            results = self._processor.post_process_object_detection(
+                outputs=outputs, target_sizes=target_sizes, threshold=self.conf_threshold
+            )[0]
+
+        detections: list[Detection] = []
+        for box, score, lab in zip(results["boxes"], results["scores"], results["labels"]):
+            phrase = self._classes[int(lab)]
+            label = self.prompts.get(phrase) or _match_label(phrase)
+            if label is None or not self._accept(label, float(score)):
+                continue
+            detections.append(
+                Detection(label=label, confidence=float(score), bbox=[float(v) for v in box.tolist()])
+            )
+        return nms_per_class(detections, self.nms_iou) if self.nms_iou and self.nms_iou > 0 else detections
+
+
+class EnsembleAnalyzer(BaseAnalyzer):
+    """
+    Ensemble di due detector: usa il `primary` per tutte le classi tranne quelle
+    in `secondary_classes`, per cui usa il `secondary`. Nato per coprire il punto
+    debole di OWLv2 (occhiali) con Grounding DINO, che sugli occhiali e' migliore.
+
+    Costo = somma delle due inferenze (accuracy-first, non real-time).
+    """
+
+    def __init__(self, primary: BaseAnalyzer, secondary: BaseAnalyzer, secondary_classes: set[str]):
+        super().__init__(f"Ensemble({primary.model_name}+{secondary.model_name})")
+        self.primary = primary
+        self.secondary = secondary
+        self.secondary_classes = set(secondary_classes)
+        self.model_id = f"{getattr(primary, 'model_id', '?')} + {getattr(secondary, 'model_id', '?')} [{'/'.join(sorted(secondary_classes))}]"
+
+    def _run_inference(self, image_source: str | np.ndarray) -> list[Detection]:
+        p = self.primary.analyze(image_source)
+        s = self.secondary.analyze(image_source)
+        dets = [d for d in p.detections if d.label not in self.secondary_classes]
+        dets += [d for d in s.detections if d.label in self.secondary_classes]
+        return dets
+
+
 # ---------------------------------------------------------------------------
 # Factory
 # ---------------------------------------------------------------------------
-DETECTOR_CHOICES = ("grounding-dino", "omdet-turbo")
+DETECTOR_CHOICES = ("grounding-dino", "omdet-turbo", "owlv2", "ensemble")
 
 
 def build_detector(
@@ -415,5 +523,16 @@ def build_detector(
     if detector == "omdet-turbo":
         kwargs = {"conf_threshold": conf_threshold} if conf_threshold is not None else {}
         return OmDetTurboAnalyzer(device=device, **kwargs)
+    if detector == "owlv2":
+        kwargs = {"conf_threshold": conf_threshold} if conf_threshold is not None else {}
+        return Owlv2Analyzer(device=device, **kwargs)
+    if detector == "ensemble":
+        # OWLv2 (piu' accurato) per tutte le classi, Grounding DINO solo per gli
+        # occhiali (dove OWLv2 e' debole). Accuracy-first, lento (somma dei due).
+        return EnsembleAnalyzer(
+            primary=Owlv2Analyzer(device=device),
+            secondary=GroundingDinoAnalyzer(device=device),
+            secondary_classes={"Glasses"},
+        )
     msg = f"Detector sconosciuto: {detector!r}. Scelte: {DETECTOR_CHOICES}"
     raise ValueError(msg)
