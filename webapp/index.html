@@ -19,6 +19,14 @@
             border:1px solid var(--line); border-radius:9px; font-size:14px; }
     .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:14px; }
     details { margin-top:14px; } summary { cursor:pointer; color:var(--accent); font-weight:600; }
+    .tip { display:inline-flex; align-items:center; justify-content:center; width:16px; height:16px; margin-left:5px;
+           border-radius:50%; background:#2b3547; color:var(--mut); font-size:11px; font-weight:700; cursor:help;
+           position:relative; vertical-align:middle; }
+    .tip:hover { background:var(--accent); color:#04121f; }
+    .tip:hover::after { content:attr(data-tip); position:absolute; bottom:150%; left:50%; transform:translateX(-50%);
+           width:250px; max-width:70vw; background:#0b1220; color:var(--fg); border:1px solid var(--line);
+           border-radius:9px; padding:9px 11px; font-size:12px; font-weight:400; line-height:1.45; text-align:left;
+           white-space:normal; z-index:30; box-shadow:0 8px 24px #000a; pointer-events:none; }
     .drop { margin-top:18px; border:2px dashed var(--line); border-radius:12px; padding:34px 18px; text-align:center;
             color:var(--mut); cursor:pointer; transition:.15s; }
     .drop.hot { border-color:var(--accent); background:#12203400; box-shadow:inset 0 0 0 999px #3ba0ff12; color:var(--fg); }
@@ -58,11 +66,11 @@
       <details>
         <summary>Impostazioni avanzate</summary>
         <div class="grid" style="margin-top:14px">
-          <div><label>Skip frames <span class="hint">(detector ogni N)</span></label><input type="number" id="skip_frames" value="8" min="1"></div>
-          <div><label>Persistenza <span class="hint">(frame per confermare)</span></label><input type="number" id="persistence" value="3" min="1"></div>
-          <div><label>Window <span class="hint">(sliding window)</span></label><input type="number" id="window" value="6" min="1"></div>
-          <div><label>Memoria PPE <span class="hint">(frame)</span></label><input type="number" id="ppe_memory" value="50" min="0"></div>
-          <div><label>Confidence <span class="hint">(vuoto = default)</span></label><input type="number" id="conf" step="0.05" min="0" max="1" placeholder="auto"></div>
+          <div><label>Skip frames <span class="tip" data-tip="Ogni quanti frame gira il detector. Più alto = più veloce ma meno reattivo: i frame intermedi riusano l'ultima detection. Default 8.">ⓘ</span></label><input type="number" id="skip_frames" value="8" min="1" title="Ogni quanti frame gira il detector (più alto = più veloce, meno reattivo)."></div>
+          <div><label>Persistenza <span class="tip" data-tip="Frame positivi nella finestra necessari per confermare una violazione. Più alto = meno falsi allarmi ma conferme più lente. Default 3.">ⓘ</span></label><input type="number" id="persistence" value="3" min="1" title="Frame positivi necessari per confermare una violazione."></div>
+          <div><label>Window <span class="tip" data-tip="Ampiezza della finestra scorrevole. La violazione è confermata se compare in almeno 'persistenza' degli ultimi 'window' frame. Default 6.">ⓘ</span></label><input type="number" id="window" value="6" min="1" title="Ampiezza della finestra scorrevole per confermare le violazioni."></div>
+          <div><label>Memoria PPE <span class="tip" data-tip="Per quanti frame un DPI visto di recente resta considerato presente anche se il detector lo perde (occlusione/blur). Riduce le violazioni fantasma su guanti/scarpe. Default 50 (~2s a 24fps).">ⓘ</span></label><input type="number" id="ppe_memory" value="50" min="0" title="Frame per cui un DPI visto di recente resta considerato presente (anti falsi allarmi)."></div>
+          <div><label>Confidence <span class="tip" data-tip="Soglia minima di confidenza del detector. Lascia vuoto per usare i default per-classe del modello. Più alta = meno falsi positivi ma meno recall.">ⓘ</span></label><input type="number" id="conf" step="0.05" min="0" max="1" placeholder="auto" title="Soglia di confidenza (vuoto = default del modello)."></div>
         </div>
       </details>
 
