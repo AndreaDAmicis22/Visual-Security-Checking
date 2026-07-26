@@ -43,6 +43,25 @@ scaricati automaticamente da HuggingFace al primo utilizzo (~1GB).
 
 ## Usage
 
+### Web UI (browser)
+
+Interfaccia grafica per caricare un video in **drag-and-drop**, scegliere il modello
+e i parametri, avviare il tracking e **scaricare il video annotato**.
+
+```bash
+pip install -r requirements.txt        # include FastAPI + uvicorn
+python webapp/app.py                    # -> http://127.0.0.1:8000
+```
+
+Nella pagina: scegli il detector (OmDet-Turbo veloce · OWLv2 miglior mAP · Grounding
+DINO max accuratezza · Ensemble OWLv2+GD), regola le impostazioni avanzate
+(skip-frames, persistenza, window, memoria PPE, confidence), trascina il video e
+avvia. Il processing gira come **job asincrono** con barra di avanzamento; a fine
+elaborazione trovi il riepilogo alert e il pulsante di **download** dell'output.
+
+> Su CPU l'elaborazione è lenta (da ~1 min con OmDet a ~9 min con l'ensemble per un
+> video di ~10 s) — la barra mostra l'avanzamento reale per frame.
+
 ### CLI
 
 ```bash

@@ -14,5 +14,10 @@ transformers>=4.46
 pillow>=10.0
 timm>=1.0            # backbone Swin per omdet-turbo (Apache 2.0)
 
+# Web UI (FastAPI, MIT) — app browser per drag-and-drop del video e tracking
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9   # upload file multipart
+
 # Dataset download (opzionale, solo per valutazione)
 # pip install roboflow

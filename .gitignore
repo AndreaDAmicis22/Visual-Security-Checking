@@ -240,3 +240,6 @@ evaluation/verify/
 # i *_results.json e gli script restano versionati. I due dump baseline gia'
 # tracciati non vengono rimossi da questa regola.
 evaluation/raw_detections_*.json
+
+# Web UI: upload e output temporanei dei job
+webapp/_jobs/

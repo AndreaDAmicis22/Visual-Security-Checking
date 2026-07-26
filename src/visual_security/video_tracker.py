@@ -286,7 +286,12 @@ class VideoSafetyTracker:
         return self._person_tracker.tracks_created
 
     # ── Entry point ────────────────────────────────────────────────────────────
-    def run(self, source: str | int = 0) -> list[FrameAlert]:
+    def run(self, source: str | int = 0, progress_cb=None) -> list[FrameAlert]:
+        """
+        progress_cb : callable(frame_idx, total_frames) | None
+            Chiamato a ogni frame (utile per barre di avanzamento, es. web UI).
+            total_frames = 0 se la sorgente non lo espone (es. webcam).
+        """
         cap = cv.VideoCapture(source)
         if not cap.isOpened():
             msg = f"Impossibile aprire la sorgente video: {source!r}"
@@ -295,6 +300,7 @@ class VideoSafetyTracker:
         fps_src = cap.get(cv.CAP_PROP_FPS) or 25.0
         fw = int(cap.get(cv.CAP_PROP_FRAME_WIDTH))
         fh = int(cap.get(cv.CAP_PROP_FRAME_HEIGHT))
+        total_frames = int(cap.get(cv.CAP_PROP_FRAME_COUNT)) or 0
 
         writer = None
         if self.save_output:
@@ -319,6 +325,8 @@ class VideoSafetyTracker:
                     break
 
                 frame_idx += 1
+                if progress_cb is not None:
+                    progress_cb(frame_idx, total_frames)
                 t_now = time.perf_counter()
                 fps_buf.append(1.0 / max(t_now - t_last, 1e-6))
                 t_last = t_now
