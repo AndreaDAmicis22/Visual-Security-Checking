@@ -11,7 +11,10 @@ polling dello stato/avanzamento e a fine elaborazione scarica l'output.
 Avvio:
     python webapp/app.py                 # http://127.0.0.1:8000
     # oppure:  uvicorn webapp.app:app    (singolo worker: i job sono in-memory)
+    .\\.venv\\Scripts\\python.exe webapp\app.py
+
 """
+
 from __future__ import annotations
 
 import shutil
@@ -25,6 +28,8 @@ from fastapi.responses import FileResponse, HTMLResponse
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
+from typing import Annotated
+
 from visual_security.analyzer import DETECTOR_CHOICES  # noqa: E402
 from visual_security.video_tracker import build_tracker  # noqa: E402
 
@@ -82,13 +87,13 @@ def detectors() -> dict:
 
 @app.post("/api/jobs")
 async def create_job(
-    video: UploadFile = File(...),
-    detector: str = Form("omdet-turbo"),
-    skip_frames: int = Form(8),
-    persistence: int = Form(3),
-    window: int = Form(6),
-    ppe_memory: int = Form(50),
-    conf: str = Form(""),
+    video: Annotated[UploadFile, File()],
+    detector: Annotated[str, Form()] = "omdet-turbo",
+    skip_frames: Annotated[int, Form()] = 8,
+    persistence: Annotated[int, Form()] = 3,
+    window: Annotated[int, Form()] = 6,
+    ppe_memory: Annotated[int, Form()] = 50,
+    conf: Annotated[str, Form()] = "",
 ) -> dict:
     if detector not in DETECTOR_CHOICES:
         raise HTTPException(400, f"detector non valido: {detector!r}")
