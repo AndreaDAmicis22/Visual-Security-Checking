@@ -5,7 +5,7 @@ Real-time PPE (Personal Protective Equipment) tracker per cantieri.
 Verifica per ogni persona i **DPI richiesti** (casco, gilet, occhiali, guanti,
 scarpe) e la presenza di **item vietati** (sigarette).
 
-Pipeline: **detector open-vocabulary** (Grounding DINO / OmDet-Turbo, zero-shot) → **PersonPPEChecker** (associazione DPI↔persona) → **PersonTracker** (identità + memoria PPE) → **sliding window** (conferma violazioni persistenti) → video annotato + log JSON.
+Pipeline: **detector open-vocabulary** (Grounding DINO / OmDet-Turbo / OWLv2, o **ensemble**, zero-shot) → **PersonPPEChecker** (associazione DPI↔persona) → **PersonTracker** (identità + memoria PPE) → **sliding window** (conferma violazioni persistenti) → video annotato + log JSON.
 
 > Per l'architettura completa, il ruolo di ogni file, i parametri di taratura e le decisioni di design: **[INFO.md](INFO.md)**.
 
@@ -18,13 +18,16 @@ sorgente dell'applicazione. Per questo è stata rimossa completamente.
 
 | Componente | Modello | Licenza |
 |---|---|---|
-| Detection (default, max accuratezza) | [IDEA-Research/grounding-dino-base](https://huggingface.co/IDEA-Research/grounding-dino-base) | Apache 2.0 |
-| Detection (alternativa real-time) | [omlab/omdet-turbo-swin-tiny-hf](https://huggingface.co/omlab/omdet-turbo-swin-tiny-hf) | Apache 2.0 |
+| Detection (real-time su CPU) | [omlab/omdet-turbo-swin-tiny-hf](https://huggingface.co/omlab/omdet-turbo-swin-tiny-hf) | Apache 2.0 |
+| Detection (miglior mAP singolo) | [google/owlv2-base-patch16-ensemble](https://huggingface.co/google/owlv2-base-patch16-ensemble) | Apache 2.0 |
+| Detection (max accuratezza zero-shot) | [IDEA-Research/grounding-dino-base](https://huggingface.co/IDEA-Research/grounding-dino-base) | Apache 2.0 |
+| **Ensemble** (accuratezza top) | OWLv2 + Grounding DINO (occhiali) | Apache 2.0 |
 
 I detector sono **open-vocabulary**: rilevano le classi da prompt testuali
 ("a person", "a hard hat", "safety glasses", "a cigarette", ...) **senza alcun
 training** — niente dataset PPE da trovare/etichettare, niente fine-tuning.
 Aggiungere una classe = aggiungere una frase in `DETECTION_PROMPTS` (analyzer.py).
+Tutti e quattro i backend sono selezionabili (`--detector`, o dalla web UI).
 
 > Nota storica: la pipeline includeva uno stadio di validazione VLM (SmolVLM)
 > nato per compensare una YOLO addestrata male su guanti e scarpe. Con i
@@ -74,8 +77,10 @@ python -m visual_security.cli track \
     --save-output output/annotated.mp4 \
     --alert-log output/alerts.json
 
-# Detector veloce (OmDet-Turbo, ~1.5s/frame su CPU vs ~22s di Grounding DINO)
+# Scelta del detector: omdet-turbo (veloce) | owlv2 (miglior mAP) |
+# grounding-dino (max accuratezza) | ensemble (owlv2 + grounding-dino sugli occhiali)
 python -m visual_security.cli track --source 0 --detector omdet-turbo
+python -m visual_security.cli track --source video.mp4 --detector ensemble
 
 # Verifica che il backend (torch/transformers) sia disponibile
 python -m visual_security.cli check-backend
@@ -115,27 +120,26 @@ python -m src.visual_security.debug_frame --image frame.jpg --detector grounding
 python -m src.visual_security.debug_video --video video.mp4 --detector omdet-turbo --samples 6
 ```
 
-## Performance (CPU-only, Intel Iris Xe, 16GB)
+## Valutazione e performance
 
-| Backend | Latenza/frame | Note |
-|---|---|---|
-| grounding-dino (default) | ~22s | massima accuratezza; usare `--skip-frames` alto o GPU |
-| omdet-turbo | ~1.5s | qualità comparabile su scene semplici, 15× più veloce |
+Confronto quantitativo completo (accuratezza su dataset etichettato + velocità sui
+video) in **[evaluation/REPORT.md](evaluation/REPORT.md)** — racconto lineare di tutte
+le prove fatte. Subset bilanciato di **259 immagini SH17**, CPU-only (Intel Iris Xe, 16 GB).
 
-Su GPU entrambi scendono sotto i 200ms/frame. Per numeri aggiornati sul tuo
-hardware esegui `benchmark_tracker.ipynb`.
-
-## Valutazione (Grounding DINO vs OmDet-Turbo)
-
-Confronto quantitativo dei due detector su dataset etichettato (accuratezza) e
-su video (comportamento temporale) in **[evaluation/REPORT.md](evaluation/REPORT.md)**.
-
-In sintesi (subset bilanciato di 259 immagini SH17):
-
-| | mAP@.5 | mAP@.3 | FPS effettivi (CPU) | Nota |
+| Detector | mAP@.5 | mAP@.3 | FPS eff. (CPU) | Quando usarlo |
 |---|---|---|---|---|
-| Grounding DINO | **0.516** | **0.576** | 0.59 | più accurato, per analisi offline/GPU |
-| OmDet-Turbo | 0.482 | 0.555 | **5.05** | ~8.6× più veloce, per live su CPU |
+| OmDet-Turbo | 0.482 | 0.555 | **5.05** | sorveglianza **live** su CPU |
+| Grounding DINO | 0.519 | 0.586 | 0.59 | analisi offline / GPU |
+| OWLv2 | 0.583 | 0.626 | 1.31 | miglior **detector singolo** |
+| **Ensemble OWLv2+GD** | **0.629** | **0.683** | 0.44 | **massima accuratezza** (offline) |
 
-Cuore del sistema solido (Person AP@.5 ~0.80); il calo è su oggetti PPE piccoli
-(guanti/scarpe/occhiali), limite atteso dello zero-shot senza fine-tuning.
+- **Cuore del sistema solido**: Person AP@.5 ~0.80. Il calo è sugli oggetti PPE piccoli
+  (guanti/scarpe/occhiali) — limite atteso dello **zero-shot senza training**.
+- **OWLv2** (Apache 2.0) batte GD/OmDet su casco/gilet/guanti; l'**ensemble** (OWLv2 +
+  Grounding DINO sugli occhiali) è il migliore in assoluto: **+21% mAP sul baseline GD**,
+  e 0 falsi positivi sui video.
+- Prompt multi-sinonimo e SAHI (tiling) provati ma **non utili**; il prossimo salto reale
+  sarebbe il **fine-tuning** (non praticabile su CPU, serve GPU).
+- Su **GPU** i detector singoli scendono sotto i ~200 ms/frame.
+
+> Riproducibilità e dettaglio per-classe: cartella `evaluation/` (script + `REPORT.md`).
